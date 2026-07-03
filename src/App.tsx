@@ -201,7 +201,7 @@ function App() {
     placeInitialOverlay();
     window.addEventListener("resize", placeInitialOverlay);
     return () => window.removeEventListener("resize", placeInitialOverlay);
-  }, [expandedView]);
+  }, [collapsed, expandedView, panelCollapsed]);
 
   async function saveSlice<K extends keyof Store>(key: K, value: Store[K]) {
     setStore((current) => ({ ...current, [key]: value }));
@@ -265,16 +265,19 @@ function App() {
   }
 
   function boundedOverlayPosition(x: number, y: number) {
-    const width = collapsed ? 76 : overlayRef.current?.offsetWidth || Math.min(expandedView ? 1080 : 980, window.innerWidth - 46);
-    const height = collapsed ? 76 : 74;
-    const visibleHandle = collapsed ? 36 : 96;
-    const minX = collapsed ? 0 : -width + visibleHandle;
-    const maxX = collapsed ? window.innerWidth - width : window.innerWidth - visibleHandle;
-    const minY = collapsed ? 0 : -Math.floor(height * 0.35);
-    const maxY = collapsed ? window.innerHeight - height : window.innerHeight - Math.floor(height * 0.65);
+    const overlayElement = overlayRef.current;
+    const overlayRect = overlayElement?.getBoundingClientRect();
+    const fallbackWidth = Math.min(expandedView ? 1080 : 980, window.innerWidth - 46);
+    const width = collapsed ? 76 : overlayRect?.width || fallbackWidth;
+    const headerHeight = collapsed ? 76 : 74;
+    const visibleHandle = collapsed ? 36 : 48;
+    const minX = -width + visibleHandle;
+    const maxX = window.innerWidth - visibleHandle;
+    const minY = -headerHeight + visibleHandle;
+    const maxY = window.innerHeight - visibleHandle;
     return {
-      x: Math.min(Math.max(minX, x), Math.max(minX, maxX)),
-      y: Math.min(Math.max(minY, y), Math.max(minY, maxY)),
+      x: Math.min(Math.max(minX, x), maxX),
+      y: Math.min(Math.max(minY, y), maxY),
     };
   }
 
@@ -354,8 +357,6 @@ function App() {
             ? "Style ready"
             : "No profile"
           : "Review ready";
-  const panelAbove = overlayPosition.y > window.innerHeight * 0.5;
-
   if (collapsed) {
     return (
       <main className="app-shell symbol-shell">
@@ -379,7 +380,7 @@ function App() {
     <main className={`app-shell ${expandedView ? "is-expanded" : "is-compact"} ${panelCollapsed ? "panel-collapsed" : ""}`}>
       <div
         ref={overlayRef}
-        className={`overlay-stack ${panelAbove ? "panel-above" : "panel-below"}`}
+        className="overlay-stack"
         style={{ left: overlayPosition.x, top: overlayPosition.y }}
       >
         <header

@@ -216,7 +216,7 @@ function setAutomationWindowMode(owner, enabled, reason = "automation") {
   } catch (_error) {
     // Best effort: the renderer can still recover through mouse passthrough.
   }
-  setWindowMousePassthrough(true, reason);
+  setWindowMousePassthrough(false, reason);
 }
 
 async function focusTargetApp(targetApp, reason = "typing") {
