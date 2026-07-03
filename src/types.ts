@@ -1,4 +1,4 @@
-export type TypingMode = "character" | "word" | "sentence" | "paragraph" | "custom";
+export type TypingMode = "structured" | "character" | "word" | "sentence" | "paragraph" | "custom";
 export type CitationStyle = "APA" | "MLA" | "Chicago" | "IEEE";
 
 export interface SourceRecord {
