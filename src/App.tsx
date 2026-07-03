@@ -19,7 +19,6 @@ import {
   Plus,
   RefreshCcw,
   Search,
-  Settings2,
   ShieldAlert,
   SkipForward,
   Square,
@@ -29,7 +28,7 @@ import {
   Wand2,
   X,
 } from "lucide-react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { buildCitationOutput, formatBibliography, sourcePreview } from "./lib/citationFormat";
 import { evaluateRubric } from "./lib/rubricTools";
 import { analyzeStyleProfile, checkConsistency, rewriteWithStyle } from "./lib/styleTools";
@@ -602,6 +601,94 @@ function MiniPage({ lines = 10 }: { lines?: number }) {
   );
 }
 
+const paperPageCharacterLimit = 1050;
+
+function paginateDraft(text: string): string[] {
+  if (!text) return [""];
+
+  const tokens = text.match(/\S+\s*|\s+/g) || [text];
+  const pages: string[] = [];
+  let currentPage = "";
+
+  for (const token of tokens) {
+    const nextPage = currentPage + token;
+    const tokenCreatesNewPage =
+      currentPage.trim().length > 0 &&
+      nextPage.length > paperPageCharacterLimit &&
+      !/^\s+$/.test(token);
+
+    if (tokenCreatesNewPage) {
+      pages.push(currentPage);
+      currentPage = token;
+    } else {
+      currentPage = nextPage;
+    }
+  }
+
+  pages.push(currentPage);
+  return pages.length ? pages : [""];
+}
+
+function replaceDraftPageValue(pages: string[], pageIndex: number, nextValue: string) {
+  return pages.map((page, index) => (index === pageIndex ? nextValue : page));
+}
+
+function pagesAreEqual(firstPages: string[], secondPages: string[]) {
+  return firstPages.length === secondPages.length && firstPages.every((page, index) => page === secondPages[index]);
+}
+
+function getPageSplitIndex(textarea: HTMLTextAreaElement, value: string) {
+  let low = 1;
+  let high = value.length;
+  let best = 1;
+  const originalValue = textarea.value;
+
+  while (low <= high) {
+    const middle = Math.floor((low + high) / 2);
+    textarea.value = value.slice(0, middle);
+
+    if (textarea.scrollHeight <= textarea.clientHeight + 2) {
+      best = middle;
+      low = middle + 1;
+    } else {
+      high = middle - 1;
+    }
+  }
+
+  textarea.value = originalValue;
+
+  const fittingText = value.slice(0, best);
+  const fallbackSplit = Math.max(1, best);
+  const minimumUsefulSplit = Math.floor(fallbackSplit * 0.65);
+  const whitespaceMatches = Array.from(fittingText.matchAll(/\s+/g));
+  const lastWhitespace = whitespaceMatches.at(-1);
+  const whitespaceSplit = lastWhitespace ? lastWhitespace.index + lastWhitespace[0].length : 0;
+
+  return whitespaceSplit >= minimumUsefulSplit ? whitespaceSplit : fallbackSplit;
+}
+
+function rebalanceVisiblePages(pages: string[], pageElements: Array<HTMLTextAreaElement | null>) {
+  const balancedPages = [...pages];
+
+  for (let index = 0; index < balancedPages.length; index += 1) {
+    const textarea = pageElements[index];
+    if (!textarea) continue;
+
+    textarea.value = balancedPages[index];
+    while (balancedPages[index].length > 1 && textarea.scrollHeight > textarea.clientHeight + 2) {
+      const splitIndex = getPageSplitIndex(textarea, balancedPages[index]);
+      if (splitIndex >= balancedPages[index].length) break;
+
+      const overflow = balancedPages[index].slice(splitIndex);
+      balancedPages[index] = balancedPages[index].slice(0, splitIndex);
+      balancedPages[index + 1] = `${overflow}${balancedPages[index + 1] || ""}`;
+      textarea.value = balancedPages[index];
+    }
+  }
+
+  return balancedPages;
+}
+
 function formatRemainingTime(ms: number) {
   const totalSeconds = Math.max(0, Math.ceil(ms / 1000));
   const minutes = Math.floor(totalSeconds / 60);
@@ -674,9 +761,12 @@ function AutoTyperTab({
   const [preserveFormatting, setPreserveFormatting] = useState(true);
   const [previewOpen, setPreviewOpen] = useState(false);
   const [message, setMessage] = useState("");
+  const [expandedPages, setExpandedPages] = useState<string[] | null>(null);
+  const pageEditorRefs = useRef<Array<HTMLTextAreaElement | null>>([]);
 
   const wpm = speedPreset === "slow" ? 22 : speedPreset === "fast" ? 85 : speedPreset === "custom" ? customWpm : 45;
   const chunks = useMemo(() => createChunks(text, typingMode, customChunkSize), [text, typingMode, customChunkSize]);
+  const pages = useMemo(() => expandedPages || paginateDraft(text), [expandedPages, text]);
   const duration = estimateDurationSeconds(chunks, typingMode, wpm);
   const completed = autoEvent?.log?.chunksCompleted || 0;
   const total = autoEvent?.log?.chunkCount || chunks.length;
@@ -691,8 +781,32 @@ function AutoTyperTab({
     }
   }, [autoEvent]);
 
+  useLayoutEffect(() => {
+    if (!expanded) return;
+
+    const balancedPages = rebalanceVisiblePages(pages, pageEditorRefs.current);
+    if (!pagesAreEqual(balancedPages, pages)) {
+      setExpandedPages(balancedPages);
+      setText(balancedPages.join(""));
+    }
+  }, [expanded, pages]);
+
+  useEffect(() => {
+    if (expanded) {
+      setExpandedPages(paginateDraft(text));
+    } else {
+      setExpandedPages(null);
+    }
+  }, [expanded]);
+
   function appendText(value: string) {
     setText((current) => (current ? `${current}\n\n${value}` : value));
+  }
+
+  function updatePage(pageIndex: number, nextValue: string) {
+    const nextPages = replaceDraftPageValue(pages, pageIndex, nextValue);
+    setExpandedPages(nextPages);
+    setText(nextPages.join(""));
   }
 
   async function start() {
@@ -748,49 +862,52 @@ function AutoTyperTab({
     return (
       <div className="expanded-auto">
         <aside className="page-rail">
-          <div className="rail-tabs">
-            <button className="rail-icon active">
-              <FileText size={18} />
-            </button>
-            <button className="rail-icon">
-              <Settings2 size={18} />
-            </button>
+          <div className="page-thumb-list">
+            {pages.map((page, index) => (
+              <button
+                className={`page-thumb ${index === 0 ? "active" : ""}`}
+                key={`page-${index}-${page.length}`}
+                onClick={() => document.getElementById(`paper-page-${index}`)?.scrollIntoView({ behavior: "smooth", block: "center" })}
+              >
+                <MiniPage lines={Math.min(12, Math.max(4, Math.ceil(page.length / 150)))} />
+                <span>Page {index + 1}</span>
+              </button>
+            ))}
           </div>
-          <div className="page-thumb active">
-            <MiniPage lines={12} />
-            <span>Page 1</span>
-          </div>
-          <div className="page-thumb">
-            <MiniPage lines={10} />
-            <span>Page 2</span>
-          </div>
-          <button className="add-page-button">
+          <button
+            className="add-page-button"
+            onClick={() => {
+              const nextPages = [...pages, ""];
+              setExpandedPages(nextPages);
+              setText(nextPages.join(""));
+            }}
+          >
             <Plus size={24} />
             <span>Add Page</span>
           </button>
         </aside>
 
         <section className="document-stage">
-          <div className="document-tabs">
-            <button className="active">Pages</button>
-            <button onClick={() => setPreviewOpen(true)}>Chunks</button>
-            <button onClick={() => setPreviewOpen((current) => !current)}>Preview</button>
-          </div>
           <div className="paper-scroll">
-            <div className="paper-editor-wrap">
-              <textarea
-                className="paper-editor"
-                value={text}
-                onChange={(event) => setText(event.target.value)}
-                placeholder="Type or paste your draft here..."
-              />
-              <button className="field-expand-button expanded" onClick={onToggleExpanded} title="Return to compact input">
-                <Minimize2 size={16} />
-              </button>
-            </div>
-            <div className="paper-page ghost-page">
-              <MiniPage lines={9} />
-            </div>
+            {pages.map((page, index) => (
+              <div className="paper-editor-wrap" id={`paper-page-${index}`} key={`editor-page-${index}`}>
+                <textarea
+                  className="paper-editor"
+                  ref={(element) => {
+                    pageEditorRefs.current[index] = element;
+                  }}
+                  value={page}
+                  onChange={(event) => updatePage(index, event.target.value)}
+                  placeholder={index === 0 ? "Type or paste your draft here..." : ""}
+                />
+                {index === 0 && (
+                  <button className="field-expand-button expanded" onClick={onToggleExpanded} title="Return to compact input">
+                    <Minimize2 size={16} />
+                  </button>
+                )}
+                <footer>Page {index + 1}</footer>
+              </div>
+            ))}
           </div>
         </section>
 
@@ -851,10 +968,6 @@ function AutoTyperTab({
               <Play size={18} />
               Start
             </button>
-            <button className="tool-button" onClick={() => setPreviewOpen((current) => !current)}>
-              <FileText size={16} />
-              Preview sequence
-            </button>
           </div>
         </aside>
       </div>
@@ -871,9 +984,8 @@ function AutoTyperTab({
           value={text}
           onChange={(event) => setText(event.target.value)}
           placeholder="Paste text to auto type..."
-          maxLength={2000}
         />
-        <span>{countWords(text) || 0}/200 words</span>
+        <span>{countWords(text) || 0} words</span>
       </section>
 
       <section className="auto-controls-card">
