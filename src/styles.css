@@ -303,12 +303,8 @@ select option {
   border-radius: 20px;
 }
 
-.panel-below .glass-panel {
+.glass-panel {
   top: 82px;
-}
-
-.panel-above .glass-panel {
-  bottom: 82px;
 }
 
 .panel-collapsed .glass-panel {
