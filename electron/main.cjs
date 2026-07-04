@@ -242,13 +242,42 @@ async function pasteTextIntoTarget(text) {
   await sleep(70);
 }
 
-async function pasteRichContentIntoTarget(text, html) {
+async function pasteRichContentIntoTarget(text, html, rtf = "") {
   clipboard.write({
     text: String(text || ""),
     html: String(html || ""),
+    rtf: String(rtf || ""),
   });
   await runAppleScript('tell application "System Events" to keystroke "v" using command down', 8000);
   await sleep(110);
+}
+
+function readClipboardSnapshot() {
+  return {
+    text: clipboard.readText(),
+    html: clipboard.readHTML(),
+    rtf: clipboard.readRTF(),
+  };
+}
+
+function restoreClipboardSnapshot(snapshot) {
+  if (snapshot?.html || snapshot?.rtf) clipboard.write({ text: snapshot.text || "", html: snapshot.html || "", rtf: snapshot.rtf || "" });
+  else clipboard.writeText(snapshot?.text || "");
+}
+
+function plainTextFromHtml(html) {
+  return String(html || "")
+    .replace(/<\s*br\s*\/?>/gi, "\n")
+    .replace(/<\/\s*(p|div|h[1-6]|li|tr|blockquote)\s*>/gi, "\n")
+    .replace(/<[^>]+>/g, "")
+    .replace(/&nbsp;/g, " ")
+    .replace(/&amp;/g, "&")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
 }
 
 async function pressBackspace(times = 1) {
@@ -503,6 +532,7 @@ async function runAutoTyperJob(job) {
   const originalClipboard = {
     text: clipboard.readText(),
     html: clipboard.readHTML(),
+    rtf: clipboard.readRTF(),
   };
 
   try {
@@ -530,7 +560,7 @@ async function runAutoTyperJob(job) {
       const targetReady = await ensureTargetReadyForPaste(job);
       if (targetReady) {
         const richText = request.plainText || request.chunks.join("");
-        await pasteRichContentIntoTarget(richText, request.richHtml);
+        await pasteRichContentIntoTarget(richText, request.richHtml, request.richRtf);
         log.textInserted = richText;
         log.chunksCompleted = request.chunks.length;
         if (request.saveProgressAfterEachChunk) saveDb();
@@ -604,10 +634,7 @@ async function runAutoTyperJob(job) {
     recordAutoTyperLogEvent(log, "error", error.message || String(error));
     sendAutoTyperEvent(autoTyperTimingPayload(job, { type: "error", jobId: job.id, error: error.message || String(error), log }));
   } finally {
-    if (request.preserveClipboard) {
-      if (originalClipboard.html) clipboard.write({ text: originalClipboard.text, html: originalClipboard.html });
-      else clipboard.writeText(originalClipboard.text);
-    }
+    if (request.preserveClipboard) restoreClipboardSnapshot(originalClipboard);
     setAutomationWindowMode(job, false, "auto-finished");
     currentJob = null;
     saveDb();
@@ -954,17 +981,38 @@ async function parseOneFile(filePath) {
       ".env",
     ]);
     const plainTextNames = new Set(["dockerfile", "makefile", "gemfile", "rakefile", "procfile", ".gitignore"]);
+    if (ext === ".html" || ext === ".htm") {
+      const html = fs.readFileSync(filePath, "utf8");
+      return { path: filePath, name, text: plainTextFromHtml(html), html };
+    }
+
     if (textExtensions.has(ext) || plainTextNames.has(name.toLowerCase())) {
-      return { path: filePath, name, text: fs.readFileSync(filePath, "utf8") };
+      const text = fs.readFileSync(filePath, "utf8");
+      return { path: filePath, name, text };
     }
 
     if (ext === ".docx") {
       const mammoth = require("mammoth");
-      const result = await mammoth.extractRawText({ path: filePath });
-      return { path: filePath, name, text: result.value || "", warnings: result.messages || [] };
+      const [textResult, htmlResult] = await Promise.all([
+        mammoth.extractRawText({ path: filePath }),
+        mammoth.convertToHtml({ path: filePath }),
+      ]);
+      return {
+        path: filePath,
+        name,
+        text: textResult.value || plainTextFromHtml(htmlResult.value),
+        html: htmlResult.value || "",
+        warnings: [...(textResult.messages || []), ...(htmlResult.messages || [])],
+      };
     }
 
     if (ext === ".pdf") {
+      try {
+        const text = (await run("pdftotext", ["-layout", filePath, "-"], { timeout: 30000 })).replace(/\f/g, "");
+        if (text.trim()) return { path: filePath, name, text };
+      } catch (_error) {
+        // Fall through to the bundled parser when Poppler is unavailable.
+      }
       const pdfParse = require("pdf-parse");
       const result = await pdfParse(fs.readFileSync(filePath));
       return { path: filePath, name, text: result.text || "" };
@@ -1142,7 +1190,7 @@ ipcMain.handle("target:get", async () => {
 });
 
 ipcMain.handle("target:captureSelectedText", async () => {
-  const originalClipboard = clipboard.readText();
+  const originalClipboard = readClipboardSnapshot();
   const targetApp = cleanTargetAppName(lastTargetApp);
   const windowState = {};
   if (!targetApp) {
@@ -1160,10 +1208,12 @@ ipcMain.handle("target:captureSelectedText", async () => {
     await runAppleScript('tell application "System Events" to keystroke "c" using command down', 8000);
     await sleep(260);
     const text = clipboard.readText();
-    clipboard.writeText(originalClipboard);
-    return { ok: true, text, targetApp };
+    const html = clipboard.readHTML();
+    const rtf = clipboard.readRTF();
+    restoreClipboardSnapshot(originalClipboard);
+    return { ok: true, text, html, rtf, targetApp };
   } catch (error) {
-    clipboard.writeText(originalClipboard);
+    restoreClipboardSnapshot(originalClipboard);
     return { ok: false, text: "", targetApp, error: error.message || String(error) };
   } finally {
     setAutomationWindowMode(windowState, false, "capture-finished");
@@ -1194,6 +1244,23 @@ ipcMain.handle("target:insertText", async (_event, text) => {
   } finally {
     setAutomationWindowMode(windowState, false, "insert-finished");
   }
+});
+
+ipcMain.handle("documents:selectFiles", async (_event, options = {}) => {
+  const accept = String(options.accept || "");
+  const extensions = Array.from(new Set(accept.match(/\.[A-Za-z0-9]+/g)?.map((part) => part.slice(1).toLowerCase()) || []));
+  const filters = extensions.length
+    ? [
+        { name: "Supported documents", extensions },
+        { name: "All files", extensions: ["*"] },
+      ]
+    : [{ name: "All files", extensions: ["*"] }];
+  const result = await dialog.showOpenDialog(mainWindow, {
+    properties: options.multiple === false ? ["openFile"] : ["openFile", "multiSelections"],
+    filters,
+  });
+  if (result.canceled) return { ok: true, canceled: true, paths: [] };
+  return { ok: true, canceled: false, paths: result.filePaths };
 });
 
 ipcMain.handle("documents:parseFiles", async (_event, paths) => {

@@ -163,8 +163,8 @@ export function estimateDurationSeconds(chunks: string[], mode: TypingMode, wpm:
   return chunks.reduce((total, chunk) => total + (Math.max(1, countVisibleUnits(chunk)) / safeWpm) * 60, 0);
 }
 
-export function textFromFiles(files: FileList | File[]): string[] {
-  return Array.from(files).map((file) => (file as File & { path?: string }).path || "");
+export function textFromFiles(files: FileList | File[] | string[] | ArrayLike<File | string>): string[] {
+  return Array.from(files as ArrayLike<File | string>).map((file) => (typeof file === "string" ? file : (file as File & { path?: string }).path || ""));
 }
 
 export function formatDuration(seconds: number): string {
