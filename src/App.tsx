@@ -1,6 +1,10 @@
 import {
+  AlignCenter,
+  AlignLeft,
+  AlignRight,
   AlertTriangle,
   BookOpen,
+  Bold,
   Check,
   ChevronDown,
   ChevronUp,
@@ -9,7 +13,10 @@ import {
   FileCheck2,
   FileDown,
   FileText,
+  Italic,
   Keyboard,
+  List,
+  ListOrdered,
   Maximize2,
   Minus,
   Minimize2,
@@ -24,11 +31,12 @@ import {
   Square,
   Target,
   Timer,
+  Underline,
   Upload,
   Wand2,
   X,
 } from "lucide-react";
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { buildCitationOutput, formatBibliography, sourcePreview } from "./lib/citationFormat";
 import { evaluateRubric } from "./lib/rubricTools";
 import { analyzeStyleProfile, checkConsistency, rewriteWithStyle } from "./lib/styleTools";
@@ -147,9 +155,12 @@ function App() {
       "input",
       "select",
       "textarea",
+      "[contenteditable='true']",
       "label",
       ".tab-strip",
       ".auto-text-card",
+      ".rich-text-editor",
+      ".format-toolbar",
       ".auto-controls-card",
       ".claims-card",
       ".sources-card",
@@ -283,7 +294,7 @@ function App() {
 
   function startOverlayDrag(event: React.PointerEvent<HTMLElement>) {
     const target = event.target as HTMLElement;
-    if (!target.closest(".mini-orb") && target.closest("button, input, select, textarea, label, .no-drag")) return;
+    if (!target.closest(".mini-orb") && target.closest("button, input, select, textarea, label, [contenteditable='true'], .no-drag")) return;
     dragState.current = {
       startX: event.clientX,
       startY: event.clientY,
@@ -592,6 +603,362 @@ function EmptyState({ icon, title, body }: { icon: React.ReactNode; title: strin
   );
 }
 
+type FormatCommand = "bold" | "italic" | "underline" | "justifyLeft" | "justifyCenter" | "justifyRight" | "insertUnorderedList" | "insertOrderedList";
+
+type InlineFormat = {
+  bold: boolean;
+  italic: boolean;
+  underline: boolean;
+};
+
+type FormatState = Record<FormatCommand, boolean>;
+
+const defaultFormatState: FormatState = {
+  bold: false,
+  italic: false,
+  underline: false,
+  justifyLeft: false,
+  justifyCenter: false,
+  justifyRight: false,
+  insertUnorderedList: false,
+  insertOrderedList: false,
+};
+
+const defaultInlineFormat: InlineFormat = {
+  bold: false,
+  italic: false,
+  underline: false,
+};
+
+function formatFromElement(element: HTMLElement, inherited: InlineFormat): InlineFormat {
+  const style = element.style;
+  const weight = style.fontWeight;
+  const hasNumericWeight = weight.trim().length > 0 && Number.isFinite(Number(weight));
+  const numericWeight = hasNumericWeight ? Number(weight) : 0;
+  const tagName = element.tagName;
+  const hasNormalWeight = weight === "normal" || weight === "lighter" || weight === "400" || (hasNumericWeight && numericWeight < 600);
+  const hasBoldWeight = weight === "bold" || weight === "bolder" || (hasNumericWeight && numericWeight >= 600);
+  const textDecoration = `${style.textDecorationLine} ${style.textDecoration}`;
+  const hasNoUnderline = /\bnone\b/.test(textDecoration);
+  const hasUnderline = textDecoration.includes("underline");
+  return {
+    bold: hasNormalWeight ? false : inherited.bold || tagName === "B" || tagName === "STRONG" || hasBoldWeight,
+    italic: style.fontStyle === "normal" ? false : inherited.italic || tagName === "I" || tagName === "EM" || style.fontStyle === "italic" || style.fontStyle === "oblique",
+    underline: hasNoUnderline ? false : inherited.underline || tagName === "U" || hasUnderline,
+  };
+}
+
+function wrapInlineFormat(html: string, format: InlineFormat): string {
+  let next = html;
+  if (format.underline) next = `<u>${next}</u>`;
+  if (format.italic) next = `<em>${next}</em>`;
+  if (format.bold) next = `<strong>${next}</strong>`;
+  return next;
+}
+
+function blockAlignValue(style: CSSStyleDeclaration): string | null {
+  return ["center", "right", "justify"].includes(style.textAlign) ? style.textAlign : null;
+}
+
+function blockAlignAttribute(align: string | null): string {
+  return align ? ` style="text-align: ${align};"` : "";
+}
+
+function cssLengthToPx(value: string): number {
+  const match = String(value || "").trim().match(/^(-?\d+(?:\.\d+)?)(px|pt|em|rem|in|cm|mm)?$/i);
+  if (!match) return 0;
+  const amount = Number(match[1]);
+  const unit = (match[2] || "px").toLowerCase();
+  if (!Number.isFinite(amount) || amount <= 0) return 0;
+  if (unit === "pt") return amount * (96 / 72);
+  if (unit === "em" || unit === "rem") return amount * 16;
+  if (unit === "in") return amount * 96;
+  if (unit === "cm") return amount * (96 / 2.54);
+  if (unit === "mm") return amount * (96 / 25.4);
+  return amount;
+}
+
+function firstAvailableCssLength(style: CSSStyleDeclaration, names: Array<keyof CSSStyleDeclaration>): number {
+  for (const name of names) {
+    const value = style[name];
+    if (typeof value !== "string") continue;
+    const px = cssLengthToPx(value);
+    if (px > 0) return px;
+  }
+  return 0;
+}
+
+function editorTabHtml(count = 1): string {
+  return Array.from({ length: Math.max(1, count) })
+    .map(() => '<span class="editor-tab" data-tab="true">&nbsp;&nbsp;&nbsp;&nbsp;</span>')
+    .join("");
+}
+
+function blockIndentHtml(style: CSSStyleDeclaration): string {
+  const indentPx = firstAvailableCssLength(style, ["textIndent", "marginLeft", "paddingLeft"]);
+  if (indentPx < 10) return "";
+  return editorTabHtml(Math.min(8, Math.max(1, Math.round(indentPx / 48))));
+}
+
+function blockNeedsBlankLine(element: HTMLElement): boolean {
+  if (element.tagName === "P") return true;
+  const style = element.style;
+  const spacingPx = Math.max(
+    firstAvailableCssLength(style, ["marginBottom", "paddingBottom"]),
+    firstAvailableCssLength(style, ["marginTop", "paddingTop"]),
+  );
+  return spacingPx >= 8;
+}
+
+function escapeEditorText(value: string): string {
+  return escapeHtml(value)
+    .replace(/\t/g, editorTabHtml())
+    .replace(/\r\n?/g, "\n")
+    .replace(/\n/g, "<br>");
+}
+
+function normalizePastedStructure(html: string): string {
+  return html
+    .replace(/(?:<div><br><\/div>){3,}/g, "<div><br></div><div><br></div>")
+    .replace(/(?:<div><br><\/div>)+$/g, "");
+}
+
+function pasteStructureScore(html: string): number {
+  return (html.match(/class="editor-tab"/g) || []).length * 2 + (html.match(/<div><br><\/div>/g) || []).length;
+}
+
+function sanitizePastedHtml(html: string, fallbackText: string): string {
+  if (!html) return textToEditorHtml(fallbackText);
+  const documentValue = new DOMParser().parseFromString(html, "text/html");
+  const blockTags = new Set(["P", "DIV", "H1", "H2", "H3", "H4", "H5", "H6", "BLOCKQUOTE"]);
+  const inlineTags = new Set(["B", "STRONG", "I", "EM", "U", "SPAN", "FONT"]);
+  const listTags = new Set(["UL", "OL"]);
+
+  function sanitizeNode(node: Node, inheritedFormat: InlineFormat): string {
+    if (node.nodeType === Node.TEXT_NODE) return wrapInlineFormat(escapeEditorText(node.textContent || ""), inheritedFormat);
+    if (node.nodeType !== Node.ELEMENT_NODE) return "";
+
+    const element = node as HTMLElement;
+    const tagName = element.tagName;
+    if (tagName === "SCRIPT" || tagName === "STYLE" || tagName === "META" || tagName === "LINK" || tagName === "IMG") return "";
+    if (tagName === "BR") return "<br>";
+
+    if (listTags.has(tagName)) {
+      const children = Array.from(element.childNodes).map((child) => sanitizeNode(child, defaultInlineFormat)).join("");
+      return `<${tagName.toLowerCase()}>${children}</${tagName.toLowerCase()}>`;
+    }
+
+    if (tagName === "LI") {
+      const itemFormat = formatFromElement(element, inheritedFormat);
+      const children = Array.from(element.childNodes)
+        .map((child) => sanitizeNode(child, child.nodeType === Node.ELEMENT_NODE && blockTags.has((child as HTMLElement).tagName) ? defaultInlineFormat : itemFormat))
+        .join("");
+      return `<li>${children || "<br>"}</li>`;
+    }
+
+    if (blockTags.has(tagName)) {
+      const blockFormat = formatFromElement(element, inheritedFormat);
+      const align = blockAlignValue(element.style);
+      const indent = blockIndentHtml(element.style);
+      const blankAfter = blockNeedsBlankLine(element) ? "<div><br></div>" : "";
+      const childNodes = Array.from(element.childNodes);
+      const hasChildBlocks = childNodes.some(
+        (child) => child.nodeType === Node.ELEMENT_NODE && (blockTags.has((child as HTMLElement).tagName) || listTags.has((child as HTMLElement).tagName)),
+      );
+
+      if (hasChildBlocks) {
+        const pieces: string[] = [];
+        for (const child of childNodes) {
+          const childIsBlock =
+            child.nodeType === Node.ELEMENT_NODE && (blockTags.has((child as HTMLElement).tagName) || listTags.has((child as HTMLElement).tagName));
+          if (childIsBlock) {
+            pieces.push(sanitizeNode(child, defaultInlineFormat));
+            continue;
+          }
+
+          const inlinePiece = sanitizeNode(child, blockFormat);
+          if (inlinePiece.trim()) pieces.push(`<div${blockAlignAttribute(align)}>${indent}${inlinePiece}</div>${blankAfter}`);
+        }
+        return pieces.join("");
+      }
+
+      const children = childNodes.map((child) => sanitizeNode(child, blockFormat)).join("");
+      return `<div${blockAlignAttribute(align)}>${indent}${children || "<br>"}</div>${blankAfter}`;
+    }
+
+    if (inlineTags.has(tagName)) {
+      const inlineFormat = formatFromElement(element, inheritedFormat);
+      return Array.from(element.childNodes).map((child) => sanitizeNode(child, inlineFormat)).join("");
+    }
+
+    return Array.from(element.childNodes).map((child) => sanitizeNode(child, inheritedFormat)).join("");
+  }
+
+  const sanitized = normalizePastedStructure(Array.from(documentValue.body.childNodes).map((node) => sanitizeNode(node, defaultInlineFormat)).join(""));
+  const fallbackHtml = textToEditorHtml(fallbackText);
+  if (pasteStructureScore(fallbackHtml) > pasteStructureScore(sanitized) && !hasRichFormatting(sanitized)) {
+    return fallbackHtml;
+  }
+  return sanitized || textToEditorHtml(fallbackText);
+}
+
+function RichTextInput({
+  html,
+  onChange,
+  placeholder,
+  className = "",
+}: {
+  html: string;
+  onChange: (next: { html: string; text: string }) => void;
+  placeholder: string;
+  className?: string;
+}) {
+  const editorRef = useRef<HTMLDivElement | null>(null);
+  const [formatState, setFormatState] = useState<FormatState>(defaultFormatState);
+
+  useEffect(() => {
+    const editor = editorRef.current;
+    if (!editor || document.activeElement === editor || editor.innerHTML === html) return;
+    editor.innerHTML = html;
+  }, [html]);
+
+  useEffect(() => {
+    function handleSelectionChange() {
+      if (!editorRef.current?.contains(document.getSelection()?.anchorNode || null)) return;
+      updateFormatState();
+    }
+
+    document.addEventListener("selectionchange", handleSelectionChange);
+    return () => document.removeEventListener("selectionchange", handleSelectionChange);
+  }, []);
+
+  function readCommandState(command: FormatCommand): boolean {
+    try {
+      return document.queryCommandState(command);
+    } catch (_error) {
+      return false;
+    }
+  }
+
+  function updateFormatState() {
+    setFormatState({
+      bold: readCommandState("bold"),
+      italic: readCommandState("italic"),
+      underline: readCommandState("underline"),
+      justifyLeft: readCommandState("justifyLeft"),
+      justifyCenter: readCommandState("justifyCenter"),
+      justifyRight: readCommandState("justifyRight"),
+      insertUnorderedList: readCommandState("insertUnorderedList"),
+      insertOrderedList: readCommandState("insertOrderedList"),
+    });
+  }
+
+  function emitChange() {
+    const editor = editorRef.current;
+    if (!editor) return;
+    onChange({
+      html: editor.innerHTML,
+      text: editorPlainText(editor),
+    });
+  }
+
+  function runCommand(command: FormatCommand) {
+    editorRef.current?.focus();
+    document.execCommand(command);
+    setFormatState((current) => {
+      if (command === "justifyLeft" || command === "justifyCenter" || command === "justifyRight") {
+        return {
+          ...current,
+          justifyLeft: command === "justifyLeft",
+          justifyCenter: command === "justifyCenter",
+          justifyRight: command === "justifyRight",
+        };
+      }
+      if (command === "insertUnorderedList" || command === "insertOrderedList") {
+        return {
+          ...current,
+          insertUnorderedList: command === "insertUnorderedList" ? !current.insertUnorderedList : false,
+          insertOrderedList: command === "insertOrderedList" ? !current.insertOrderedList : false,
+        };
+      }
+      return { ...current, [command]: !current[command] };
+    });
+    emitChange();
+  }
+
+  function handleToolbarMouseDown(event: React.MouseEvent<HTMLButtonElement>, command: FormatCommand) {
+    event.preventDefault();
+    runCommand(command);
+  }
+
+  function handlePaste(event: React.ClipboardEvent<HTMLDivElement>) {
+    event.preventDefault();
+    const htmlValue = event.clipboardData.getData("text/html");
+    const plainValue = event.clipboardData.getData("text/plain");
+    if (htmlValue) {
+      document.execCommand("insertHTML", false, sanitizePastedHtml(htmlValue, plainValue));
+    } else if (plainValue) {
+      document.execCommand("insertHTML", false, textToEditorHtml(plainValue));
+    }
+    updateFormatState();
+    emitChange();
+  }
+
+  function handleKeyDown(event: React.KeyboardEvent<HTMLDivElement>) {
+    if (event.key !== "Tab") return;
+    event.preventDefault();
+    document.execCommand("insertHTML", false, escapeEditorText("\t"));
+    updateFormatState();
+    emitChange();
+  }
+
+  function toolbarButton(command: FormatCommand, title: string, icon: React.ReactNode) {
+    return (
+      <button
+        type="button"
+        className={formatState[command] ? "active" : ""}
+        aria-pressed={formatState[command]}
+        onMouseDown={(event) => handleToolbarMouseDown(event, command)}
+        title={title}
+      >
+        {icon}
+      </button>
+    );
+  }
+
+  return (
+    <div className={`rich-editor-shell ${className}`}>
+      <div className="format-toolbar" aria-label="Text formatting">
+        {toolbarButton("bold", "Bold", <Bold size={16} />)}
+        {toolbarButton("italic", "Italic", <Italic size={16} />)}
+        {toolbarButton("underline", "Underline", <Underline size={16} />)}
+        <span />
+        {toolbarButton("justifyLeft", "Align left", <AlignLeft size={16} />)}
+        {toolbarButton("justifyCenter", "Center", <AlignCenter size={16} />)}
+        {toolbarButton("justifyRight", "Align right", <AlignRight size={16} />)}
+        <span />
+        {toolbarButton("insertUnorderedList", "Bulleted list", <List size={16} />)}
+        {toolbarButton("insertOrderedList", "Numbered list", <ListOrdered size={16} />)}
+      </div>
+      <div
+        ref={editorRef}
+        className="rich-text-editor"
+        contentEditable
+        data-placeholder={placeholder}
+        onInput={emitChange}
+        onBlur={emitChange}
+        onClick={updateFormatState}
+        onKeyUp={updateFormatState}
+        onPaste={handlePaste}
+        onKeyDown={handleKeyDown}
+        role="textbox"
+        aria-multiline="true"
+        suppressContentEditableWarning
+      />
+    </div>
+  );
+}
+
 function MiniPage({ lines = 10 }: { lines?: number }) {
   return (
     <div className="mini-page">
@@ -603,6 +970,56 @@ function MiniPage({ lines = 10 }: { lines?: number }) {
 }
 
 const paperPageCharacterLimit = 1050;
+
+function escapeHtml(value: string): string {
+  return value
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+function textToEditorHtml(value: string): string {
+  if (!value) return "";
+  return value
+    .split("\n")
+    .map((line) => `<div>${line ? escapeEditorText(line) : "<br>"}</div>`)
+    .join("");
+}
+
+function normalizeEditorText(value: string): string {
+  return value.replace(/\u00a0/g, " ");
+}
+
+function editorNodePlainText(node: Node): string {
+  if (node.nodeType === Node.TEXT_NODE) return normalizeEditorText(node.textContent || "");
+  if (node.nodeType !== Node.ELEMENT_NODE) return "";
+
+  const element = node as HTMLElement;
+  if (element.dataset.tab === "true") return "\t";
+  if (element.tagName === "BR") return "\n";
+  return Array.from(element.childNodes).map(editorNodePlainText).join("");
+}
+
+function editorPlainText(editor: HTMLElement): string {
+  const blocks = Array.from(editor.children);
+  if (!blocks.length) return editorNodePlainText(editor);
+  return blocks
+    .map((block) => {
+      const onlyBreak =
+        block.childNodes.length === 1 &&
+        block.firstChild?.nodeType === Node.ELEMENT_NODE &&
+        (block.firstChild as HTMLElement).tagName === "BR";
+      if (onlyBreak) return "";
+      return editorNodePlainText(block).replace(/\n$/, "");
+    })
+    .join("\n");
+}
+
+function hasRichFormatting(html: string): boolean {
+  return /<(b|strong|i|em|u|ol|ul|li)\b/i.test(html) || /text-align\s*:\s*(center|right|justify)|font-weight|font-style|text-decoration|margin-left|padding-left/i.test(html);
+}
 
 function paginateDraft(text: string): string[] {
   if (!text) return [""];
@@ -746,6 +1163,7 @@ function AutoTyperTab({
   onStarted: () => void;
 }) {
   const [text, setText] = useState("");
+  const [richHtml, setRichHtml] = useState("");
   const [typingMode, setTypingMode] = useState<TypingMode>("sentence");
   const [speedPreset, setSpeedPreset] = useState("normal");
   const [customWpm, setCustomWpm] = useState(45);
@@ -762,12 +1180,9 @@ function AutoTyperTab({
   const [preserveFormatting, setPreserveFormatting] = useState(true);
   const [previewOpen, setPreviewOpen] = useState(false);
   const [message, setMessage] = useState("");
-  const [expandedPages, setExpandedPages] = useState<string[] | null>(null);
-  const pageEditorRefs = useRef<Array<HTMLTextAreaElement | null>>([]);
 
   const wpm = speedPreset === "slow" ? 22 : speedPreset === "fast" ? 85 : speedPreset === "custom" ? customWpm : 45;
   const chunks = useMemo(() => createChunks(text, typingMode, customChunkSize), [text, typingMode, customChunkSize]);
-  const pages = useMemo(() => expandedPages || paginateDraft(text), [expandedPages, text]);
   const duration = estimateDurationSeconds(chunks, typingMode, wpm);
   const completed = autoEvent?.log?.chunksCompleted || 0;
   const total = autoEvent?.log?.chunkCount || chunks.length;
@@ -782,32 +1197,12 @@ function AutoTyperTab({
     }
   }, [autoEvent]);
 
-  useLayoutEffect(() => {
-    if (!expanded) return;
-
-    const balancedPages = rebalanceVisiblePages(pages, pageEditorRefs.current);
-    if (!pagesAreEqual(balancedPages, pages)) {
-      setExpandedPages(balancedPages);
-      setText(balancedPages.join(""));
-    }
-  }, [expanded, pages]);
-
-  useEffect(() => {
-    if (expanded) {
-      setExpandedPages(paginateDraft(text));
-    } else {
-      setExpandedPages(null);
-    }
-  }, [expanded]);
-
   function appendText(value: string) {
-    setText((current) => (current ? `${current}\n\n${value}` : value));
-  }
-
-  function updatePage(pageIndex: number, nextValue: string) {
-    const nextPages = replaceDraftPageValue(pages, pageIndex, nextValue);
-    setExpandedPages(nextPages);
-    setText(nextPages.join(""));
+    setText((current) => {
+      const next = current ? `${current}\n\n${value}` : value;
+      setRichHtml(textToEditorHtml(next));
+      return next;
+    });
   }
 
   async function start() {
@@ -823,8 +1218,11 @@ function AutoTyperTab({
       );
       if (!ok) return;
     }
+    const shouldPasteRichText = preserveFormatting && hasRichFormatting(richHtml);
     const result = await window.overlayAPI.autoTyperStart({
       chunks,
+      plainText: text,
+      richHtml: shouldPasteRichText ? richHtml : "",
       typingMode,
       wpm,
       delayBeforeStartMs: delaySeconds * 1000,
@@ -847,7 +1245,11 @@ function AutoTyperTab({
       return;
     }
     if (result.ok) onStarted();
-    setMessage(result.ok ? `Queued for ${result.targetApp || "current app"}.` : result.error || "Could not start typing.");
+    setMessage(
+      result.ok
+        ? `${shouldPasteRichText ? "Queued formatted paste" : "Queued"} for ${result.targetApp || "current app"}.`
+        : result.error || "Could not start typing.",
+    );
   }
 
   useEffect(() => {
@@ -864,51 +1266,35 @@ function AutoTyperTab({
       <div className="expanded-auto">
         <aside className="page-rail">
           <div className="page-thumb-list">
-            {pages.map((page, index) => (
-              <button
-                className={`page-thumb ${index === 0 ? "active" : ""}`}
-                key={`page-${index}-${page.length}`}
-                onClick={() => document.getElementById(`paper-page-${index}`)?.scrollIntoView({ behavior: "smooth", block: "center" })}
-              >
-                <MiniPage lines={Math.min(12, Math.max(4, Math.ceil(page.length / 150)))} />
-                <span>Page {index + 1}</span>
-              </button>
-            ))}
+            <button
+              className="page-thumb active"
+              onClick={() => document.getElementById("paper-page-0")?.scrollIntoView({ behavior: "smooth", block: "center" })}
+            >
+              <MiniPage lines={Math.min(12, Math.max(4, Math.ceil(text.length / 150)))} />
+              <span>Draft</span>
+            </button>
           </div>
-          <button
-            className="add-page-button"
-            onClick={() => {
-              const nextPages = [...pages, ""];
-              setExpandedPages(nextPages);
-              setText(nextPages.join(""));
-            }}
-          >
-            <Plus size={24} />
-            <span>Add Page</span>
-          </button>
         </aside>
 
         <section className="document-stage">
           <div className="paper-scroll">
-            {pages.map((page, index) => (
-              <div className="paper-editor-wrap" id={`paper-page-${index}`} key={`editor-page-${index}`}>
-                <textarea
-                  className="paper-editor"
-                  ref={(element) => {
-                    pageEditorRefs.current[index] = element;
+            <div className="paper-editor-wrap" id="paper-page-0">
+              <div className="paper-rich-editor">
+                <RichTextInput
+                  html={richHtml}
+                  onChange={({ html, text: nextText }) => {
+                    setRichHtml(html);
+                    setText(nextText);
                   }}
-                  value={page}
-                  onChange={(event) => updatePage(index, event.target.value)}
-                  placeholder={index === 0 ? "Type or paste your draft here..." : ""}
+                  placeholder="Type or paste your draft here..."
+                  className="paper-rich-shell"
                 />
-                {index === 0 && (
-                  <button className="field-expand-button expanded" onClick={onToggleExpanded} title="Return to compact input">
-                    <Minimize2 size={16} />
-                  </button>
-                )}
-                <footer>Page {index + 1}</footer>
               </div>
-            ))}
+              <button className="field-expand-button expanded" onClick={onToggleExpanded} title="Return to compact input">
+                <Minimize2 size={16} />
+              </button>
+              <footer>{countWords(text)} words</footer>
+            </div>
           </div>
         </section>
 
@@ -950,6 +1336,7 @@ function AutoTyperTab({
             </FieldLabel>
             <CheckRow label="Random pauses" checked={randomizedPauses} onChange={setRandomizedPauses} />
             <CheckRow label="Light edits" checked={lightEdits} onChange={setLightEdits} />
+            <CheckRow label="Keep formatting" checked={preserveFormatting} onChange={setPreserveFormatting} />
             <div className="progress-box">
               <div>
                 <strong>{chunks.length}</strong>
@@ -981,12 +1368,15 @@ function AutoTyperTab({
         <button className="field-expand-button" onClick={onToggleExpanded} title="Open expanded writing view">
           <Maximize2 size={16} />
         </button>
-        <textarea
-          value={text}
-          onChange={(event) => setText(event.target.value)}
+        <RichTextInput
+          html={richHtml}
+          onChange={({ html, text: nextText }) => {
+            setRichHtml(html);
+            setText(nextText);
+          }}
           placeholder="Paste text to auto type..."
         />
-        <span>{countWords(text) || 0} words</span>
+        <span className="word-count">{countWords(text) || 0} words</span>
       </section>
 
       <section className="auto-controls-card">
@@ -1020,6 +1410,7 @@ function AutoTyperTab({
             </select>
           </FieldLabel>
         </div>
+        <CheckRow label="Keep formatting" checked={preserveFormatting} onChange={setPreserveFormatting} />
       </section>
 
       <footer className="compact-footer">

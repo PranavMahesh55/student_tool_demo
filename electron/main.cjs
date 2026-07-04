@@ -242,6 +242,15 @@ async function pasteTextIntoTarget(text) {
   await sleep(70);
 }
 
+async function pasteRichContentIntoTarget(text, html) {
+  clipboard.write({
+    text: String(text || ""),
+    html: String(html || ""),
+  });
+  await runAppleScript('tell application "System Events" to keystroke "v" using command down', 8000);
+  await sleep(110);
+}
+
 async function pressBackspace(times = 1) {
   if (times <= 0) return;
   await runAppleScript(
@@ -479,7 +488,10 @@ function recordAutoTyperLogEvent(log, type, message) {
 
 async function runAutoTyperJob(job) {
   const { request, log } = job;
-  const originalClipboard = clipboard.readText();
+  const originalClipboard = {
+    text: clipboard.readText(),
+    html: clipboard.readHTML(),
+  };
 
   try {
     setAutomationWindowMode(job, true, "auto-start");
@@ -501,6 +513,32 @@ async function runAutoTyperJob(job) {
 
     log.startedAt = new Date().toISOString();
     recordAutoTyperLogEvent(log, "started", `Started typing into ${job.targetApp || "current app"}.`);
+
+    if (request.preserveFormatting && request.richHtml) {
+      const targetReady = await ensureTargetReadyForPaste(job);
+      if (targetReady) {
+        const richText = request.plainText || request.chunks.join("");
+        await pasteRichContentIntoTarget(richText, request.richHtml);
+        log.textInserted = richText;
+        log.chunksCompleted = request.chunks.length;
+        if (request.saveProgressAfterEachChunk) saveDb();
+        sendAutoTyperEvent(
+          autoTyperTimingPayload(job, {
+            type: "progress",
+            jobId: job.id,
+            index: request.chunks.length - 1,
+            completed: log.chunksCompleted,
+            total: request.chunks.length,
+            log,
+          }),
+        );
+      }
+      log.stoppedAt = new Date().toISOString();
+      log.status = job.stopped ? "stopped" : "completed";
+      recordAutoTyperLogEvent(log, log.status, `Typing ${log.status}.`);
+      sendAutoTyperEvent(autoTyperTimingPayload(job, { type: log.status, jobId: job.id, remainingMs: 0, log }));
+      return;
+    }
 
     for (let index = 0; index < request.chunks.length; index += 1) {
       job.currentIndex = index;
@@ -554,7 +592,10 @@ async function runAutoTyperJob(job) {
     recordAutoTyperLogEvent(log, "error", error.message || String(error));
     sendAutoTyperEvent(autoTyperTimingPayload(job, { type: "error", jobId: job.id, error: error.message || String(error), log }));
   } finally {
-    if (request.preserveClipboard) clipboard.writeText(originalClipboard);
+    if (request.preserveClipboard) {
+      if (originalClipboard.html) clipboard.write({ text: originalClipboard.text, html: originalClipboard.html });
+      else clipboard.writeText(originalClipboard.text);
+    }
     setAutomationWindowMode(job, false, "auto-finished");
     currentJob = null;
     saveDb();
