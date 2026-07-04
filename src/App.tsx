@@ -1167,7 +1167,6 @@ function AutoTyperTab({
 }) {
   const [text, setText] = useState("");
   const [richHtml, setRichHtml] = useState("");
-  const [typingMode, setTypingMode] = useState<TypingMode>("sentence");
   const [typingMode, setTypingMode] = useState<TypingMode>("structured");
   const [speedPreset, setSpeedPreset] = useState("normal");
   const [customWpm, setCustomWpm] = useState(45);
@@ -1188,7 +1187,6 @@ function AutoTyperTab({
   const wpm = speedPreset === "slow" ? 22 : speedPreset === "fast" ? 85 : speedPreset === "custom" ? customWpm : 45;
   const chunks = useMemo(() => createChunks(text, typingMode, customChunkSize), [text, typingMode, customChunkSize]);
   const visibleUnits = useMemo(() => countVisibleUnits(text), [text]);
-  const pages = useMemo(() => expandedPages || paginateDraft(text), [expandedPages, text]);
   const duration = estimateDurationSeconds(chunks, typingMode, wpm);
   const completed = autoEvent?.log?.chunksCompleted || 0;
   const total = autoEvent?.log?.chunkCount || chunks.length;
