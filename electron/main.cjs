@@ -363,8 +363,20 @@ function startTargetPolling() {
   }, 900);
 }
 
-function countWords(text) {
-  return (String(text).trim().match(/\b[\w'-]+\b/g) || []).length;
+function countVisibleUnits(text) {
+  return Array.from(String(text).matchAll(/\p{L}[\p{L}\p{N}'-]*|\p{N}+(?:[.,]\p{N}+)*|[^\s]/gu)).length;
+}
+
+function isStructuredChunk(text) {
+  const value = String(text || "");
+  return (
+    /```|~~~|\\(?:frac|sum|int|lim|sqrt|begin|end)\b|\$\S.*\S\$/.test(value) ||
+    /[{}[\];]|=>|:=|==|!=|<=|>=|&&|\|\||::|->|<\/?[A-Za-z][^>]*>/.test(value) ||
+    /[∑∫√∞≈≠≤≥±×÷→←↔∀∃∈∉⊂⊆∪∩∂∆∇πθλμσΩ]/.test(value) ||
+    value
+      .split(/\n/)
+      .some((line) => /^\s*(\||[-*+]\s+|\d+[.)]\s+|>| {2,}|\t)/.test(line) || /^[\s|:-]{3,}$/.test(line))
+  );
 }
 
 function calculateDelayMs(chunk, request, index) {
@@ -376,7 +388,7 @@ function calculateDelayMs(chunk, request, index) {
   } else if (request.typingMode === "word") {
     delay = 60000 / wpm;
   } else {
-    delay = (Math.max(1, countWords(chunk)) / wpm) * 60000;
+    delay = (Math.max(1, countVisibleUnits(chunk)) / wpm) * 60000;
   }
 
   if (request.pauseAfterSentence && /[.!?]["')\]]?\s*$/.test(chunk)) delay += 450;
@@ -398,7 +410,7 @@ function estimateDelayMs(chunk, request, index) {
   } else if (request.typingMode === "word") {
     delay = 60000 / wpm;
   } else {
-    delay = (Math.max(1, countWords(chunk)) / wpm) * 60000;
+    delay = (Math.max(1, countVisibleUnits(chunk)) / wpm) * 60000;
   }
 
   if (request.pauseAfterSentence && /[.!?]["')\]]?\s*$/.test(chunk)) delay += 450;
@@ -442,7 +454,7 @@ async function waitWhilePaused(job) {
 }
 
 async function insertChunk(job, chunk) {
-  if (!job.request.lightEdits || chunk.length < 24 || Math.random() > 0.22) {
+  if (!job.request.lightEdits || chunk.length < 24 || isStructuredChunk(chunk) || Math.random() > 0.22) {
     await pasteTextIntoTarget(chunk);
     return;
   }
@@ -880,7 +892,69 @@ async function parseOneFile(filePath) {
   }
 
   try {
-    if ([".txt", ".md", ".markdown", ".csv", ".html", ".htm"].includes(ext)) {
+    const textExtensions = new Set([
+      ".txt",
+      ".md",
+      ".markdown",
+      ".csv",
+      ".tsv",
+      ".yaml",
+      ".yml",
+      ".json",
+      ".jsonc",
+      ".html",
+      ".htm",
+      ".xml",
+      ".css",
+      ".scss",
+      ".sass",
+      ".less",
+      ".js",
+      ".jsx",
+      ".ts",
+      ".tsx",
+      ".mjs",
+      ".cjs",
+      ".py",
+      ".rb",
+      ".go",
+      ".rs",
+      ".java",
+      ".kt",
+      ".kts",
+      ".swift",
+      ".c",
+      ".cc",
+      ".cpp",
+      ".cxx",
+      ".h",
+      ".hpp",
+      ".cs",
+      ".php",
+      ".sh",
+      ".bash",
+      ".zsh",
+      ".fish",
+      ".ps1",
+      ".bat",
+      ".sql",
+      ".r",
+      ".m",
+      ".mm",
+      ".scala",
+      ".clj",
+      ".hs",
+      ".lua",
+      ".pl",
+      ".pm",
+      ".tex",
+      ".bib",
+      ".toml",
+      ".ini",
+      ".env",
+    ]);
+    const plainTextNames = new Set(["dockerfile", "makefile", "gemfile", "rakefile", "procfile", ".gitignore"]);
+    if (textExtensions.has(ext) || plainTextNames.has(name.toLowerCase())) {
       return { path: filePath, name, text: fs.readFileSync(filePath, "utf8") };
     }
 

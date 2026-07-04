@@ -41,6 +41,7 @@ import { buildCitationOutput, formatBibliography, sourcePreview } from "./lib/ci
 import { evaluateRubric } from "./lib/rubricTools";
 import { analyzeStyleProfile, checkConsistency, rewriteWithStyle } from "./lib/styleTools";
 import {
+  countVisibleUnits,
   countWords,
   createChunks,
   estimateDurationSeconds,
@@ -254,7 +255,7 @@ function App() {
       messages.push(...parsed.filter((file) => file.error).map((file) => `${file.name}: ${file.error}`));
     } else {
       for (const file of fileArray) {
-        if (/\.(txt|md|markdown|csv|html?)$/i.test(file.name)) {
+        if (/\.(txt|md|markdown|csv|tsv|ya?ml|json|jsonc|html?|xml|css|scss|sass|less|js|jsx|ts|tsx|mjs|cjs|py|rb|go|rs|java|kt|kts|swift|c|cc|cpp|cxx|h|hpp|cs|php|sh|bash|zsh|fish|ps1|bat|sql|r|R|m|mm|scala|clj|hs|lua|pl|pm|tex|bib|toml|ini|env|gitignore|dockerfile)$/i.test(file.name)) {
           texts.push(await file.text());
         } else {
           messages.push(`${file.name}: this file needs the Electron file parser.`);
@@ -970,6 +971,8 @@ function MiniPage({ lines = 10 }: { lines?: number }) {
 }
 
 const paperPageCharacterLimit = 1050;
+const broadTextAccept =
+  ".txt,.md,.markdown,.csv,.tsv,.json,.jsonc,.yaml,.yml,.html,.htm,.xml,.css,.scss,.sass,.less,.js,.jsx,.ts,.tsx,.mjs,.cjs,.py,.java,.c,.cc,.cpp,.cxx,.h,.hpp,.cs,.go,.rs,.swift,.kt,.kts,.php,.rb,.sh,.bash,.zsh,.fish,.ps1,.bat,.sql,.r,.m,.mm,.scala,.clj,.hs,.lua,.pl,.pm,.tex,.bib,.toml,.ini,.env,.docx,.pdf";
 
 function escapeHtml(value: string): string {
   return value
@@ -1165,6 +1168,7 @@ function AutoTyperTab({
   const [text, setText] = useState("");
   const [richHtml, setRichHtml] = useState("");
   const [typingMode, setTypingMode] = useState<TypingMode>("sentence");
+  const [typingMode, setTypingMode] = useState<TypingMode>("structured");
   const [speedPreset, setSpeedPreset] = useState("normal");
   const [customWpm, setCustomWpm] = useState(45);
   const [delaySeconds, setDelaySeconds] = useState(3);
@@ -1183,6 +1187,8 @@ function AutoTyperTab({
 
   const wpm = speedPreset === "slow" ? 22 : speedPreset === "fast" ? 85 : speedPreset === "custom" ? customWpm : 45;
   const chunks = useMemo(() => createChunks(text, typingMode, customChunkSize), [text, typingMode, customChunkSize]);
+  const visibleUnits = useMemo(() => countVisibleUnits(text), [text]);
+  const pages = useMemo(() => expandedPages || paginateDraft(text), [expandedPages, text]);
   const duration = estimateDurationSeconds(chunks, typingMode, wpm);
   const completed = autoEvent?.log?.chunksCompleted || 0;
   const total = autoEvent?.log?.chunkCount || chunks.length;
@@ -1210,9 +1216,9 @@ function AutoTyperTab({
       setMessage("Paste, upload, or capture text before starting.");
       return;
     }
-    if (chunks.length > 55 || countWords(text) > 1200) {
+    if (chunks.length > 55 || visibleUnits > 1200) {
       const ok = window.confirm(
-        `This job has ${chunks.length} chunks and about ${countWords(text)} words. Start progressive typing into ${
+        `This job has ${chunks.length} chunks and about ${visibleUnits} typed units. Start progressive typing into ${
           targetApp || "the detected app"
         }?`,
       );
@@ -1312,8 +1318,10 @@ function AutoTyperTab({
             <FieldLabel>
               Chunk size
               <select value={typingMode} onChange={(event) => setTypingMode(event.target.value as TypingMode)}>
+                <option value="structured">Structured</option>
                 <option value="sentence">Sentences</option>
                 <option value="paragraph">Paragraphs</option>
+                <option value="character">Characters</option>
                 <option value="word">Words</option>
                 <option value="custom">Custom chunks</option>
               </select>
@@ -1337,14 +1345,21 @@ function AutoTyperTab({
             <CheckRow label="Random pauses" checked={randomizedPauses} onChange={setRandomizedPauses} />
             <CheckRow label="Light edits" checked={lightEdits} onChange={setLightEdits} />
             <CheckRow label="Keep formatting" checked={preserveFormatting} onChange={setPreserveFormatting} />
+            <div className="button-row">
+              <FileButton label="Upload" accept={broadTextAccept} onFiles={(files) => parseFiles(files, appendText)} />
+              <button className="tool-button" onClick={() => captureSelected(appendText)}>
+                <Target size={16} />
+                <span>Capture</span>
+              </button>
+            </div>
             <div className="progress-box">
               <div>
                 <strong>{chunks.length}</strong>
                 <span>chunks</span>
               </div>
               <div>
-                <strong>{countWords(text)}</strong>
-                <span>words</span>
+                <strong>{visibleUnits}</strong>
+                <span>units</span>
               </div>
               <div>
                 <strong>{formatDuration(duration)}</strong>
@@ -1377,6 +1392,12 @@ function AutoTyperTab({
           placeholder="Paste text to auto type..."
         />
         <span className="word-count">{countWords(text) || 0} words</span>
+        <textarea
+          value={text}
+          onChange={(event) => setText(event.target.value)}
+          placeholder="Paste prose, code, equations, tables, or any formatted text..."
+        />
+        <span>{visibleUnits || 0} typed units</span>
       </section>
 
       <section className="auto-controls-card">
@@ -1404,9 +1425,12 @@ function AutoTyperTab({
           <FieldLabel>
             Chunk size
             <select value={typingMode} onChange={(event) => setTypingMode(event.target.value as TypingMode)}>
+              <option value="structured">Structured</option>
               <option value="sentence">Sentences</option>
               <option value="paragraph">Paragraph</option>
               <option value="word">Words</option>
+              <option value="character">Characters</option>
+              <option value="custom">Custom chunks</option>
             </select>
           </FieldLabel>
         </div>
@@ -1418,6 +1442,11 @@ function AutoTyperTab({
           <span className="status-dot" /> {message || (targetApp ? `Target: ${targetApp}` : "No target")}
         </span>
         <div className="compact-actions">
+          <FileButton label="Upload" accept={broadTextAccept} onFiles={(files) => parseFiles(files, appendText)} />
+          <button className="tool-button" onClick={() => captureSelected(appendText)}>
+            <Target size={16} />
+            Capture
+          </button>
           <button className="tool-button" onClick={() => setPreviewOpen((current) => !current)}>
             <FileText size={16} />
             Preview
