@@ -676,6 +676,10 @@ function textTokens(text) {
   ).filter((word) => !stopWords.has(word));
 }
 
+function countWords(text) {
+  return (String(text).trim().match(/\b[\w'-]+\b/g) || []).length;
+}
+
 function extractClaims(text) {
   const sentences = String(text)
     .replace(/\s+/g, " ")
