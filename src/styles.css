@@ -369,7 +369,7 @@ select option {
 .auto-compact {
   height: 310px;
   max-height: 310px;
-  grid-template-columns: minmax(300px, 0.9fr) minmax(360px, 1.25fr);
+  grid-template-columns: minmax(430px, 3fr) minmax(280px, 2fr);
   grid-template-rows: minmax(0, 240px) 70px;
   overflow: hidden;
 }
@@ -390,9 +390,9 @@ select option {
   position: relative;
   display: grid;
   grid-template-rows: minmax(0, 1fr) auto;
-  gap: 10px;
+  gap: 8px;
   margin: 14px 0 0 14px;
-  padding: 14px 16px 16px;
+  padding: 12px 16px 12px;
   border-radius: 12px;
   min-height: 0;
   min-width: 0;
@@ -552,9 +552,9 @@ select option {
 .auto-controls-card {
   display: grid;
   align-content: center;
-  gap: 22px;
+  gap: 18px;
   margin: 14px 14px 0 14px;
-  padding: 10px 18px;
+  padding: 10px 16px;
   border-radius: 12px;
   min-width: 0;
   min-height: 0;
@@ -563,15 +563,74 @@ select option {
 
 .speed-line {
   display: grid;
-  grid-template-columns: 70px minmax(150px, 1fr) 80px;
+  grid-template-columns: 58px minmax(120px, 1fr) 58px;
   align-items: center;
-  gap: 14px;
+  gap: 10px;
   color: #ffffff;
-  font-size: 16px;
+  font-size: 15px;
 }
 
 .speed-line input {
-  accent-color: #4d91ff;
+  width: 100%;
+}
+
+.speed-slider {
+  --speed-fill: 50%;
+  appearance: none;
+  height: 24px;
+  margin: 0;
+  background: transparent;
+  cursor: pointer;
+}
+
+.speed-slider.speed-slow {
+  --speed-fill: 0%;
+}
+
+.speed-slider.speed-normal {
+  --speed-fill: 50%;
+}
+
+.speed-slider.speed-fast {
+  --speed-fill: 100%;
+}
+
+.speed-slider::-webkit-slider-runnable-track {
+  height: 8px;
+  border-radius: 999px;
+  background: linear-gradient(90deg, #4d91ff 0 var(--speed-fill), rgba(255, 255, 255, 0.2) var(--speed-fill) 100%);
+}
+
+.speed-slider::-webkit-slider-thumb {
+  appearance: none;
+  width: 22px;
+  height: 22px;
+  margin-top: -7px;
+  border: 2px solid #ffffff;
+  border-radius: 50%;
+  background: #4d91ff;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.28);
+}
+
+.speed-slider::-moz-range-track {
+  height: 8px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.2);
+}
+
+.speed-slider::-moz-range-progress {
+  height: 8px;
+  border-radius: 999px;
+  background: #4d91ff;
+}
+
+.speed-slider::-moz-range-thumb {
+  width: 18px;
+  height: 18px;
+  border: 2px solid #ffffff;
+  border-radius: 50%;
+  background: #4d91ff;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.28);
 }
 
 .speed-line em {
@@ -1143,6 +1202,40 @@ select:focus {
 .score-strip span {
   color: rgba(247, 250, 252, 0.62);
   font-size: 11px;
+}
+
+.progress-box {
+  gap: 6px;
+  margin-top: 6px;
+  padding: 7px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 14px;
+  background:
+    linear-gradient(135deg, rgba(77, 145, 255, 0.12), rgba(255, 255, 255, 0.045)),
+    rgba(255, 255, 255, 0.055);
+}
+
+.progress-box div {
+  min-height: 44px;
+  align-content: center;
+  gap: 1px;
+  padding: 7px 5px;
+  border-color: rgba(255, 255, 255, 0.08);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.065);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.06);
+}
+
+.progress-box strong {
+  font-size: 17px;
+  line-height: 1;
+}
+
+.progress-box span {
+  font-size: 10px;
+  line-height: 1;
+  letter-spacing: 0;
+  text-transform: uppercase;
 }
 
 .meter {
