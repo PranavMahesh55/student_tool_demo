@@ -60,6 +60,8 @@ const sourcePreferences = [
   "User-uploaded sources only",
 ];
 
+type AcceptText = (text: string, html?: string, rtf?: string) => void;
+
 const defaultStore = {
   settings: {
     alwaysOnTop: true,
@@ -233,10 +235,10 @@ function App() {
     setToast(result.targetApp ? `Target app: ${result.targetApp}` : "No target app detected yet.");
   }
 
-  async function captureSelected(acceptText: (text: string) => void) {
+  async function captureSelected(acceptText: AcceptText) {
     const result = await window.overlayAPI.captureSelectedText();
     if (result.ok && result.text) {
-      acceptText(result.text);
+      acceptText(result.text, result.html, result.rtf);
       setTargetApp(result.targetApp || targetApp);
       setToast(`Captured selected text from ${result.targetApp || "target app"}.`);
     } else {
@@ -244,28 +246,36 @@ function App() {
     }
   }
 
-  async function parseFiles(files: FileList | File[], acceptText: (text: string) => void) {
-    const fileArray = Array.from(files);
+  async function parseFiles(files: FileList | File[] | string[], acceptText: AcceptText) {
+    const fileArray = Array.from(files as ArrayLike<File | string>);
     const paths = textFromFiles(fileArray).filter(Boolean);
-    let texts: string[] = [];
+    const contents: Array<{ text: string; html?: string }> = [];
     const messages: string[] = [];
 
     if (paths.length) {
       const parsed = await window.overlayAPI.parseFiles(paths);
-      texts = parsed.map((file) => file.text).filter(Boolean);
+      contents.push(...parsed.map((file) => ({ text: file.text || "", html: file.html || "" })).filter((file) => file.text));
       messages.push(...parsed.filter((file) => file.error).map((file) => `${file.name}: ${file.error}`));
     } else {
       for (const file of fileArray) {
+        if (typeof file === "string") continue;
         if (/\.(txt|md|markdown|csv|tsv|ya?ml|json|jsonc|html?|xml|css|scss|sass|less|js|jsx|ts|tsx|mjs|cjs|py|rb|go|rs|java|kt|kts|swift|c|cc|cpp|cxx|h|hpp|cs|php|sh|bash|zsh|fish|ps1|bat|sql|r|R|m|mm|scala|clj|hs|lua|pl|pm|tex|bib|toml|ini|env|gitignore|dockerfile)$/i.test(file.name)) {
-          texts.push(await file.text());
+          const text = await file.text();
+          contents.push({ text, html: /\.html?$/i.test(file.name) ? text : "" });
         } else {
           messages.push(`${file.name}: this file needs the Electron file parser.`);
         }
       }
     }
 
-    if (texts.length) acceptText(texts.join("\n\n"));
-    setToast(messages.length ? messages.join(" ") : `Imported ${texts.length || fileArray.length} file(s).`);
+    if (contents.length) {
+      const text = contents.map((item) => item.text).join("\n\n");
+      const html = contents
+        .map((item) => (item.html ? sanitizePastedHtml(item.html, item.text) : textToEditorHtml(item.text)))
+        .join("<div><br></div>");
+      acceptText(text, html);
+    }
+    setToast(messages.length ? messages.join(" ") : `Imported ${contents.length || fileArray.length} file(s).`);
   }
 
   async function toggleAlwaysOnTop(enabled: boolean) {
@@ -576,13 +586,25 @@ function FileButton({
   label: string;
   accept: string;
   multiple?: boolean;
-  onFiles: (files: FileList) => void;
+  onFiles: (files: FileList | string[]) => void;
 }) {
+  const inputRef = useRef<HTMLInputElement | null>(null);
+
+  async function chooseFiles() {
+    if (window.overlayAPI.selectFiles) {
+      const result = await window.overlayAPI.selectFiles({ accept, multiple });
+      if (result?.ok && result.paths?.length) onFiles(result.paths);
+      return;
+    }
+    inputRef.current?.click();
+  }
+
   return (
-    <label className="tool-button">
+    <button className="tool-button" type="button" onClick={chooseFiles}>
       <Upload size={16} />
       <span>{label}</span>
       <input
+        ref={inputRef}
         type="file"
         accept={accept}
         multiple={multiple}
@@ -591,7 +613,7 @@ function FileButton({
           event.currentTarget.value = "";
         }}
       />
-    </label>
+    </button>
   );
 }
 
@@ -611,6 +633,11 @@ type InlineFormat = {
   bold: boolean;
   italic: boolean;
   underline: boolean;
+};
+
+type RichClipboardSource = {
+  html: string;
+  rtf: string;
 };
 
 type FormatState = Record<FormatCommand, boolean>;
@@ -715,6 +742,7 @@ function blockNeedsBlankLine(element: HTMLElement): boolean {
 function escapeEditorText(value: string): string {
   return escapeHtml(value)
     .replace(/\t/g, editorTabHtml())
+    .replace(/ {2,}/g, (spaces) => "&nbsp;".repeat(spaces.length))
     .replace(/\r\n?/g, "\n")
     .replace(/\n/g, "<br>");
 }
@@ -992,6 +1020,10 @@ function textToEditorHtml(value: string): string {
     .join("");
 }
 
+function hasClipboardFormatting(source: RichClipboardSource): boolean {
+  return Boolean(source.html.trim() || source.rtf.trim());
+}
+
 function normalizeEditorText(value: string): string {
   return value.replace(/\u00a0/g, " ");
 }
@@ -1160,28 +1192,25 @@ function AutoTyperTab({
   targetApp: string | null;
   settings: Store["settings"];
   autoEvent: any;
-  parseFiles: (files: FileList | File[], acceptText: (text: string) => void) => Promise<void>;
-  captureSelected: (acceptText: (text: string) => void) => Promise<void>;
+  parseFiles: (files: FileList | File[] | string[], acceptText: AcceptText) => Promise<void>;
+  captureSelected: (acceptText: AcceptText) => Promise<void>;
   expanded: boolean;
   onToggleExpanded: () => void;
   onStarted: () => void;
 }) {
   const [text, setText] = useState("");
   const [richHtml, setRichHtml] = useState("");
+  const [richClipboardSource, setRichClipboardSource] = useState<RichClipboardSource>({ html: "", rtf: "" });
   const [typingMode, setTypingMode] = useState<TypingMode>("structured");
   const [speedPreset, setSpeedPreset] = useState("normal");
   const [customWpm, setCustomWpm] = useState(45);
-  const [delaySeconds, setDelaySeconds] = useState(3);
   const [pauseFrequency, setPauseFrequency] = useState(0);
   const [customChunkSize, setCustomChunkSize] = useState(35);
   const [sectionBySection, setSectionBySection] = useState(false);
   const [pauseAfterSentence, setPauseAfterSentence] = useState(true);
   const [pauseAfterParagraph, setPauseAfterParagraph] = useState(false);
-  const [randomizedPauses, setRandomizedPauses] = useState(true);
-  const [lightEdits, setLightEdits] = useState(false);
   const [saveLog, setSaveLog] = useState(true);
   const [saveProgressAfterEachChunk, setSaveProgressAfterEachChunk] = useState(true);
-  const [preserveFormatting, setPreserveFormatting] = useState(true);
   const [previewOpen, setPreviewOpen] = useState(false);
   const [message, setMessage] = useState("");
 
@@ -1202,12 +1231,12 @@ function AutoTyperTab({
     }
   }, [autoEvent]);
 
-  function appendText(value: string) {
-    setText((current) => {
-      const next = current ? `${current}\n\n${value}` : value;
-      setRichHtml(textToEditorHtml(next));
-      return next;
-    });
+  function appendText(value: string, html?: string, rtf?: string) {
+    const isAppending = Boolean(text.trim() || richHtml.trim());
+    const nextHtml = html ? sanitizePastedHtml(html, value) : textToEditorHtml(value);
+    setText((current) => (current ? `${current}\n\n${value}` : value));
+    setRichHtml((current) => (current ? `${current}<div><br></div>${nextHtml}` : nextHtml));
+    setRichClipboardSource(isAppending ? { html: "", rtf: "" } : { html: html || nextHtml, rtf: rtf || "" });
   }
 
   async function start() {
@@ -1223,23 +1252,25 @@ function AutoTyperTab({
       );
       if (!ok) return;
     }
-    const shouldPasteRichText = preserveFormatting && hasRichFormatting(richHtml);
+    const shouldPasteRichText = hasClipboardFormatting(richClipboardSource) || hasRichFormatting(richHtml);
+    const richHtmlForPaste = richClipboardSource.html || richHtml;
     const result = await window.overlayAPI.autoTyperStart({
       chunks,
       plainText: text,
-      richHtml: shouldPasteRichText ? richHtml : "",
+      richHtml: shouldPasteRichText ? richHtmlForPaste : "",
+      richRtf: shouldPasteRichText ? richClipboardSource.rtf : "",
       typingMode,
       wpm,
-      delayBeforeStartMs: delaySeconds * 1000,
+      delayBeforeStartMs: 3000,
       pauseFrequency,
       sectionBySection,
       pauseAfterSentence,
       pauseAfterParagraph,
-      randomizedPauses,
-      lightEdits,
+      randomizedPauses: true,
+      lightEdits: false,
       saveLog,
       saveProgressAfterEachChunk,
-      preserveFormatting,
+      preserveFormatting: true,
       preserveClipboard: settings.preserveClipboard,
       targetApp,
     });
@@ -1290,6 +1321,7 @@ function AutoTyperTab({
                   onChange={({ html, text: nextText }) => {
                     setRichHtml(html);
                     setText(nextText);
+                    setRichClipboardSource({ html: "", rtf: "" });
                   }}
                   placeholder="Type or paste your draft here..."
                   className="paper-rich-shell"
@@ -1333,17 +1365,6 @@ function AutoTyperTab({
                 <option value={5}>Every 5 chunks</option>
               </select>
             </FieldLabel>
-            <FieldLabel>
-              Start delay
-              <select value={delaySeconds} onChange={(event) => setDelaySeconds(Number(event.target.value))}>
-                <option value={0}>None</option>
-                <option value={3}>Normal</option>
-                <option value={10}>Long</option>
-              </select>
-            </FieldLabel>
-            <CheckRow label="Random pauses" checked={randomizedPauses} onChange={setRandomizedPauses} />
-            <CheckRow label="Light edits" checked={lightEdits} onChange={setLightEdits} />
-            <CheckRow label="Keep formatting" checked={preserveFormatting} onChange={setPreserveFormatting} />
             <div className="button-row">
               <FileButton label="Upload" accept={broadTextAccept} onFiles={(files) => parseFiles(files, appendText)} />
               <button className="tool-button" onClick={() => captureSelected(appendText)}>
@@ -1387,6 +1408,7 @@ function AutoTyperTab({
           onChange={({ html, text: nextText }) => {
             setRichHtml(html);
             setText(nextText);
+            setRichClipboardSource({ html: "", rtf: "" });
           }}
           placeholder="Paste text to auto type..."
         />
@@ -1398,6 +1420,7 @@ function AutoTyperTab({
           <span>Speed</span>
           <input
             type="range"
+            className={`speed-slider speed-${speedPreset === "slow" ? "slow" : speedPreset === "fast" ? "fast" : "normal"}`}
             min={0}
             max={2}
             value={speedPreset === "slow" ? 0 : speedPreset === "fast" ? 2 : 1}
@@ -1427,7 +1450,6 @@ function AutoTyperTab({
             </select>
           </FieldLabel>
         </div>
-        <CheckRow label="Keep formatting" checked={preserveFormatting} onChange={setPreserveFormatting} />
       </section>
 
       <footer className="compact-footer">
@@ -1479,8 +1501,8 @@ function CitationsTab({
   appendSliceItem,
   expanded,
 }: {
-  captureSelected: (acceptText: (text: string) => void) => Promise<void>;
-  parseFiles: (files: FileList | File[], acceptText: (text: string) => void) => Promise<void>;
+  captureSelected: (acceptText: AcceptText) => Promise<void>;
+  parseFiles: (files: FileList | File[] | string[], acceptText: AcceptText) => Promise<void>;
   appendSliceItem: (key: keyof Store, item: unknown) => Promise<void>;
   expanded: boolean;
 }) {
@@ -1934,8 +1956,8 @@ function StyleTab({
   expanded,
 }: {
   profile: StyleProfile | null;
-  parseFiles: (files: FileList | File[], acceptText: (text: string) => void) => Promise<void>;
-  captureSelected: (acceptText: (text: string) => void) => Promise<void>;
+  parseFiles: (files: FileList | File[] | string[], acceptText: AcceptText) => Promise<void>;
+  captureSelected: (acceptText: AcceptText) => Promise<void>;
   saveProfile: (profile: StyleProfile) => Promise<void>;
   saveSamples: (samples: unknown[]) => Promise<void>;
   clearProfile: () => Promise<void>;
@@ -2411,8 +2433,8 @@ function RubricTab({
   appendReport,
   expanded,
 }: {
-  parseFiles: (files: FileList | File[], acceptText: (text: string) => void) => Promise<void>;
-  captureSelected: (acceptText: (text: string) => void) => Promise<void>;
+  parseFiles: (files: FileList | File[] | string[], acceptText: AcceptText) => Promise<void>;
+  captureSelected: (acceptText: AcceptText) => Promise<void>;
   appendReport: (report: RubricReport) => Promise<void>;
   expanded: boolean;
 }) {

@@ -10,6 +10,7 @@ const api = {
   getTargetApp: () => ipcRenderer.invoke("target:get"),
   captureSelectedText: () => ipcRenderer.invoke("target:captureSelectedText"),
   insertText: (text) => ipcRenderer.invoke("target:insertText", text),
+  selectFiles: (options) => ipcRenderer.invoke("documents:selectFiles", options),
   parseFiles: (paths) => ipcRenderer.invoke("documents:parseFiles", paths),
   saveSlice: (key, value) => ipcRenderer.invoke("data:set", key, value),
   appendSliceItem: (key, item) => ipcRenderer.invoke("data:append", key, item),

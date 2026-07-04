@@ -21,6 +21,7 @@ declare global {
       getTargetApp: () => Promise<any>;
       captureSelectedText: () => Promise<any>;
       insertText: (text: string) => Promise<any>;
+      selectFiles?: (options: { accept: string; multiple?: boolean }) => Promise<any>;
       parseFiles: (paths: string[]) => Promise<any[]>;
       saveSlice: (key: StoreKey, value: unknown) => Promise<any>;
       appendSliceItem: (key: StoreKey, item: unknown) => Promise<any>;
