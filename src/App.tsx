@@ -89,6 +89,7 @@ function App() {
   const [toast, setToast] = useState("");
   const [autoEvent, setAutoEvent] = useState<any>(null);
   const [expandedView, setExpandedView] = useState(false);
+  const activeExpandedView = activeTab === "auto" && expandedView;
   const [panelCollapsed, setPanelCollapsed] = useState(false);
   const [clockNow, setClockNow] = useState(Date.now());
   const [overlayPosition, setOverlayPosition] = useState({ x: 360, y: 28 });
@@ -213,7 +214,7 @@ function App() {
     placeInitialOverlay();
     window.addEventListener("resize", placeInitialOverlay);
     return () => window.removeEventListener("resize", placeInitialOverlay);
-  }, [collapsed, expandedView, panelCollapsed]);
+  }, [activeExpandedView, collapsed, panelCollapsed]);
 
   async function saveSlice<K extends keyof Store>(key: K, value: Store[K]) {
     setStore((current) => ({ ...current, [key]: value }));
@@ -279,7 +280,7 @@ function App() {
   function boundedOverlayPosition(x: number, y: number) {
     const overlayElement = overlayRef.current;
     const overlayRect = overlayElement?.getBoundingClientRect();
-    const fallbackWidth = Math.min(expandedView ? 1080 : 980, window.innerWidth - 46);
+    const fallbackWidth = Math.min(activeExpandedView ? 1080 : 980, window.innerWidth - 46);
     const width = collapsed ? 76 : overlayRect?.width || fallbackWidth;
     const headerHeight = collapsed ? 76 : 74;
     const visibleHandle = collapsed ? 36 : 48;
@@ -389,7 +390,7 @@ function App() {
   }
 
   return (
-    <main className={`app-shell ${expandedView ? "is-expanded" : "is-compact"} ${panelCollapsed ? "panel-collapsed" : ""}`}>
+    <main className={`app-shell ${activeExpandedView ? "is-expanded" : "is-compact"} ${panelCollapsed ? "panel-collapsed" : ""}`}>
       <div
         ref={overlayRef}
         className="overlay-stack"
@@ -504,7 +505,7 @@ function App() {
             captureSelected={captureSelected}
             parseFiles={parseFiles}
             appendSliceItem={appendSliceItem}
-            expanded={expandedView}
+            expanded={false}
           />
         )}
         {activeTab === "style" && (
@@ -517,7 +518,7 @@ function App() {
             clearProfile={() => saveSlice("styleProfile", null)}
             clearSamples={() => saveSlice("writingSamples", [] as any)}
             appendRevision={(item) => appendSliceItem("revisionHistory", item)}
-            expanded={expandedView}
+            expanded={false}
           />
         )}
         {activeTab === "rubric" && (
@@ -525,7 +526,7 @@ function App() {
             parseFiles={parseFiles}
             captureSelected={captureSelected}
             appendReport={(report) => appendSliceItem("rubricReports", report)}
-            expanded={expandedView}
+            expanded={false}
           />
         )}
           </section>
@@ -1389,13 +1390,7 @@ function AutoTyperTab({
           }}
           placeholder="Paste text to auto type..."
         />
-        <span className="word-count">{countWords(text) || 0} words</span>
-        <textarea
-          value={text}
-          onChange={(event) => setText(event.target.value)}
-          placeholder="Paste prose, code, equations, tables, or any formatted text..."
-        />
-        <span>{visibleUnits || 0} typed units</span>
+        <span className="word-count">{countWords(text) || 0} words | {visibleUnits || 0} typed units</span>
       </section>
 
       <section className="auto-controls-card">
@@ -1494,7 +1489,7 @@ function CitationsTab({
   const [preferences, setPreferences] = useState<string[]>(["Scholarly sources"]);
   const [fromYear, setFromYear] = useState("");
   const [toYear, setToYear] = useState("");
-  const [sourcesNeeded, setSourcesNeeded] = useState(2);
+  const [sourcesNeeded, setSourcesNeeded] = useState(6);
   const [inlineCitations, setInlineCitations] = useState(true);
   const [generateBibliography, setGenerateBibliography] = useState(true);
   const [flagUnsupported, setFlagUnsupported] = useState(true);
@@ -1556,6 +1551,23 @@ function CitationsTab({
       else chosen.add(sourceId);
       return { ...current, [claimId]: Array.from(chosen) };
     });
+  }
+
+  function sourceUrl(source: SourceRecord) {
+    const doi = String(source.doi || "").trim();
+    if (doi) return /^https?:\/\//i.test(doi) ? doi : `https://doi.org/${doi.replace(/^doi:/i, "")}`;
+    return String(source.url || "").trim();
+  }
+
+  async function openSource(source: SourceRecord) {
+    const url = sourceUrl(source);
+    if (url) await window.overlayAPI.openExternal(url);
+  }
+
+  function openSourceFromKeyboard(event: React.KeyboardEvent<HTMLElement>, source: SourceRecord) {
+    if (event.key !== "Enter" && event.key !== " ") return;
+    event.preventDefault();
+    openSource(source);
   }
 
   function addManualSource() {
@@ -1656,17 +1668,43 @@ function CitationsTab({
           <h2>Top sources for selected claim</h2>
           {selectedSources.length ? (
             <div className="source-card-list">
-              {selectedSources.slice(0, 3).map((source) => (
-                <button className="source-card-row" key={source.id} onClick={() => selectedClaim && toggleSource(selectedClaim.id, source.id)}>
-                  <span className="source-letter">{(source.title || "S").slice(0, 1)}</span>
-                  <span>
-                    <em className={`quality ${qualityClass(source.qualityLabel)}`}>{source.qualityLabel || "Source"}</em>
-                    <strong>{source.title}</strong>
-                    <small>{source.container || source.publisher || source.url || "Retrieved source"} {source.year ? `• ${source.year}` : ""}</small>
-                  </span>
-                  <small>{Math.round((source.relevanceScore || 0.86) * 100)}% match</small>
-                </button>
-              ))}
+              {selectedSources.map((source) => {
+                const isApproved = selectedClaim ? (approved[selectedClaim.id] || []).includes(source.id) : false;
+                const url = sourceUrl(source);
+                return (
+                  <div
+                    className={`source-card-row ${isApproved ? "approved" : ""} ${url ? "" : "no-link"}`}
+                    key={source.id}
+                    role={url ? "link" : "group"}
+                    tabIndex={url ? 0 : -1}
+                    title={url ? "Open source" : "No source URL available"}
+                    onClick={() => openSource(source)}
+                    onKeyDown={(event) => openSourceFromKeyboard(event, source)}
+                  >
+                    <span className="source-letter">{(source.title || "S").slice(0, 1)}</span>
+                    <span>
+                      <em className={`quality ${qualityClass(source.qualityLabel)}`}>{source.qualityLabel || "Source"}</em>
+                      <strong>{source.title}</strong>
+                      <small>{source.container || source.publisher || source.url || "Retrieved source"} {source.year ? `• ${source.year}` : ""}</small>
+                    </span>
+                    <span className="source-actions">
+                      <small>{Math.round((source.relevanceScore || 0.86) * 100)}% match</small>
+                      <button
+                        className={`source-approve-button ${isApproved ? "active" : ""}`}
+                        type="button"
+                        title={isApproved ? "Approved for citation" : "Approve for citation"}
+                        aria-label={isApproved ? "Approved for citation" : "Approve for citation"}
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          if (selectedClaim) toggleSource(selectedClaim.id, source.id);
+                        }}
+                      >
+                        <Check size={15} />
+                      </button>
+                    </span>
+                  </div>
+                );
+              })}
             </div>
           ) : (
             <EmptyState icon={<BookOpen size={26} />} title="No sources yet" body="Paste text, then use Find Sources." />
@@ -1684,8 +1722,13 @@ function CitationsTab({
           <select value={preferences[0] || "Scholarly sources"} onChange={(event) => setPreferences([event.target.value])}>
             <option>Scholarly sources</option>
             <option>News sources</option>
-            <option>Government sources</option>
-            <option>Books</option>
+          <option>Government sources</option>
+          <option>Books</option>
+        </select>
+          <select className="source-count-select" value={sourcesNeeded} onChange={(event) => setSourcesNeeded(Number(event.target.value))}>
+            <option value={3}>3 sources</option>
+            <option value={5}>5 sources</option>
+            <option value={6}>6 sources</option>
           </select>
           <button className="tool-button" onClick={insertRevised} disabled={!claims.length}>
             <BookOpen size={16} />

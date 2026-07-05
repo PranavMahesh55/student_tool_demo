@@ -760,7 +760,7 @@ function dedupeSources(sources) {
 }
 
 async function searchCrossref(query, request) {
-  const rows = Math.min(6, Math.max(2, Number(request.sourcesNeeded || 3) + 2));
+  const rows = Math.min(10, Math.max(4, Number(request.sourcesNeeded || 3) + 4));
   const url = new URL("https://api.crossref.org/works");
   url.searchParams.set("query.bibliographic", query);
   url.searchParams.set("rows", String(rows));
@@ -792,7 +792,7 @@ async function searchCrossref(query, request) {
 }
 
 async function searchOpenAlex(query, request) {
-  const perPage = Math.min(6, Math.max(2, Number(request.sourcesNeeded || 3) + 2));
+  const perPage = Math.min(10, Math.max(4, Number(request.sourcesNeeded || 3) + 4));
   const url = new URL("https://api.openalex.org/works");
   url.searchParams.set("search", query);
   url.searchParams.set("per-page", String(perPage));
@@ -820,7 +820,7 @@ async function searchOpenAlex(query, request) {
 async function searchGoogleBooks(query, request) {
   const url = new URL("https://www.googleapis.com/books/v1/volumes");
   url.searchParams.set("q", query);
-  url.searchParams.set("maxResults", String(Math.min(6, Math.max(2, Number(request.sourcesNeeded || 3)))));
+  url.searchParams.set("maxResults", String(Math.min(10, Math.max(4, Number(request.sourcesNeeded || 3) + 2))));
   const response = await fetch(url);
   if (!response.ok) return [];
   const json = await response.json();
