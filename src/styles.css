@@ -677,6 +677,9 @@ select option {
   display: grid;
   align-content: start;
   gap: 9px;
+  min-height: 0;
+  overflow-y: auto;
+  padding-right: 4px;
 }
 
 .claim-pill,
@@ -729,8 +732,18 @@ select option {
 }
 
 .source-card-row {
-  grid-template-columns: 48px minmax(0, 1fr) auto;
+  grid-template-columns: 48px minmax(0, 1fr) minmax(72px, auto);
   padding: 12px;
+  cursor: pointer;
+}
+
+.source-card-row.approved {
+  border-color: rgba(75, 158, 255, 0.72);
+  background: rgba(57, 123, 238, 0.14);
+}
+
+.source-card-row.no-link {
+  cursor: default;
 }
 
 .source-letter {
@@ -754,10 +767,34 @@ select option {
   color: rgba(247, 250, 252, 0.72);
 }
 
+.source-actions {
+  display: grid;
+  justify-items: end;
+  gap: 7px;
+}
+
+.source-approve-button {
+  width: 28px;
+  height: 28px;
+  display: grid;
+  place-items: center;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  border-radius: 999px;
+  color: rgba(247, 250, 252, 0.72);
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.source-approve-button.active {
+  border-color: rgba(75, 158, 255, 0.88);
+  color: #ffffff;
+  background: #397bee;
+}
+
 .citation-footer {
   padding: 0;
   border: 0;
   gap: 12px;
+  flex-wrap: wrap;
 }
 
 .citation-footer .segmented {
@@ -766,6 +803,10 @@ select option {
 
 .citation-footer select {
   max-width: 230px;
+}
+
+.citation-footer .source-count-select {
+  max-width: 136px;
 }
 
 .humanizer-empty-compact {
