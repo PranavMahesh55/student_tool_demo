@@ -16,6 +16,7 @@ if (!window.overlayAPI) {
     captureSelectedText: async () => ({ ok: false, text: "", error: "Selection capture is available in the desktop app." }),
     insertText: async () => ({ ok: false, error: "Insertion is available in the desktop app." }),
     parseFiles: async () => [],
+    filePathForFile: () => "",
     saveSlice: async (_key, value) => ({ ok: true, data: value }),
     appendSliceItem: async () => ({ ok: true, data: {} }),
     clearSlice: async () => ({ ok: true, data: {} }),

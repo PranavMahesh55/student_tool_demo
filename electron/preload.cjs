@@ -1,4 +1,4 @@
-const { contextBridge, ipcRenderer } = require("electron");
+const { contextBridge, ipcRenderer, webUtils } = require("electron");
 
 const api = {
   getInitialData: () => ipcRenderer.invoke("app:getInitialData"),
@@ -12,6 +12,7 @@ const api = {
   insertText: (text) => ipcRenderer.invoke("target:insertText", text),
   selectFiles: (options) => ipcRenderer.invoke("documents:selectFiles", options),
   parseFiles: (paths) => ipcRenderer.invoke("documents:parseFiles", paths),
+  filePathForFile: (file) => (file && webUtils?.getPathForFile ? webUtils.getPathForFile(file) : ""),
   saveSlice: (key, value) => ipcRenderer.invoke("data:set", key, value),
   appendSliceItem: (key, item) => ipcRenderer.invoke("data:append", key, item),
   clearSlice: (key) => ipcRenderer.invoke("data:clear", key),

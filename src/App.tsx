@@ -36,7 +36,7 @@ import {
   Wand2,
   X,
 } from "lucide-react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { buildCitationOutput, formatBibliography, sourcePreview } from "./lib/citationFormat";
 import { evaluateRubric } from "./lib/rubricTools";
 import { analyzeStyleProfile, checkConsistency, rewriteWithStyle } from "./lib/styleTools";
@@ -47,7 +47,6 @@ import {
   estimateDurationSeconds,
   formatDuration,
   makeId,
-  textFromFiles,
 } from "./lib/textTools";
 import type { CitationStyle, ClaimResult, RewriteResult, RubricReport, SourceRecord, StyleProfile, TypingMode } from "./types";
 
@@ -61,6 +60,149 @@ const sourcePreferences = [
 ];
 
 type AcceptText = (text: string, html?: string, rtf?: string) => void;
+
+type RichClipboardSource = {
+  html: string;
+  rtf: string;
+};
+
+type ManualSourceDraft = {
+  claimId: string;
+  title: string;
+  authors: string;
+  year: string;
+  url: string;
+  doi: string;
+  publisher: string;
+};
+
+type StyleRewriteStrength = "light" | "normal" | "strong";
+type StyleRewriteTone = "profile" | "clearer" | "simpler" | "formal" | "casual";
+type StyleConsistencyItem = { id: string; paragraph: string; flags: string[]; score: number };
+
+type DraftState = {
+  auto: {
+    text: string;
+    richHtml: string;
+    richClipboardSource: RichClipboardSource;
+    typingMode: TypingMode;
+    pauseFrequency: number;
+    sectionBySection: boolean;
+    pauseAfterSentence: boolean;
+    pauseAfterParagraph: boolean;
+    saveLog: boolean;
+    saveProgressAfterEachChunk: boolean;
+  };
+  citations: {
+    text: string;
+    style: CitationStyle;
+    preferences: string[];
+    fromYear: string;
+    toYear: string;
+    sourcesNeeded: number;
+    inlineCitations: boolean;
+    generateBibliography: boolean;
+    flagUnsupported: boolean;
+    citationNeed: string;
+    claims: ClaimResult[];
+    selectedClaimId: string;
+    approved: Record<string, string[]>;
+    manual: ManualSourceDraft;
+    notes: string[];
+  };
+  style: {
+    sampleText: string;
+    draft: string;
+    strength: StyleRewriteStrength;
+    tone: StyleRewriteTone;
+    preserveMeaning: boolean;
+    makeClearer: boolean;
+    makeSimpler: boolean;
+    makeFormal: boolean;
+    makeCasual: boolean;
+    keepCitations: boolean;
+    keepFormatting: boolean;
+    reduceRobotic: boolean;
+    preserveTechnicalTerms: boolean;
+    rewrite: RewriteResult | null;
+    consistency: StyleConsistencyItem[];
+    editableInstructions: string;
+  };
+  rubric: {
+    documentText: string;
+    rubricText: string;
+    instructions: string;
+    mode: string;
+    gradingScale: number;
+    targetScore: number;
+    citationStyle: CitationStyle;
+    minWords: string;
+    maxWords: string;
+    report: RubricReport | null;
+  };
+};
+
+const defaultDraftState: DraftState = {
+  auto: {
+    text: "",
+    richHtml: "",
+    richClipboardSource: { html: "", rtf: "" },
+    typingMode: "sentence",
+    pauseFrequency: 0,
+    sectionBySection: false,
+    pauseAfterSentence: true,
+    pauseAfterParagraph: false,
+    saveLog: true,
+    saveProgressAfterEachChunk: true,
+  },
+  citations: {
+    text: "",
+    style: "APA",
+    preferences: ["Scholarly sources"],
+    fromYear: "",
+    toYear: "",
+    sourcesNeeded: 6,
+    inlineCitations: true,
+    generateBibliography: true,
+    flagUnsupported: true,
+    citationNeed: "",
+    claims: [],
+    selectedClaimId: "",
+    approved: {},
+    manual: { claimId: "", title: "", authors: "", year: "", url: "", doi: "", publisher: "" },
+    notes: [],
+  },
+  style: {
+    sampleText: "",
+    draft: "",
+    strength: "normal",
+    tone: "profile",
+    preserveMeaning: true,
+    makeClearer: true,
+    makeSimpler: false,
+    makeFormal: false,
+    makeCasual: false,
+    keepCitations: true,
+    keepFormatting: true,
+    reduceRobotic: true,
+    preserveTechnicalTerms: true,
+    rewrite: null,
+    consistency: [],
+    editableInstructions: "",
+  },
+  rubric: {
+    documentText: "",
+    rubricText: "",
+    instructions: "",
+    mode: "Devil's advocate reviewer",
+    gradingScale: 100,
+    targetScore: 90,
+    citationStyle: "APA",
+    minWords: "",
+    maxWords: "",
+    report: null,
+  },
+};
 
 const defaultStore = {
   settings: {
@@ -77,13 +219,63 @@ const defaultStore = {
   autoTyperLogs: [] as any[],
   rubricReports: [] as RubricReport[],
   revisionHistory: [] as any[],
+  draftState: defaultDraftState,
 };
 
 type Store = typeof defaultStore;
 type TabKey = "auto" | "citations" | "style" | "rubric";
 
+function mergeDraftState(value: unknown): DraftState {
+  const draft = (value || {}) as Partial<DraftState>;
+  return {
+    auto: {
+      ...defaultDraftState.auto,
+      ...(draft.auto || {}),
+      richClipboardSource: {
+        ...defaultDraftState.auto.richClipboardSource,
+        ...(draft.auto?.richClipboardSource || {}),
+      },
+    },
+    citations: {
+      ...defaultDraftState.citations,
+      ...(draft.citations || {}),
+      preferences: Array.isArray(draft.citations?.preferences) ? draft.citations.preferences : defaultDraftState.citations.preferences,
+      claims: Array.isArray(draft.citations?.claims) ? draft.citations.claims : [],
+      approved: draft.citations?.approved || {},
+      manual: {
+        ...defaultDraftState.citations.manual,
+        ...(draft.citations?.manual || {}),
+      },
+      notes: Array.isArray(draft.citations?.notes) ? draft.citations.notes : [],
+    },
+    style: {
+      ...defaultDraftState.style,
+      ...(draft.style || {}),
+      consistency: Array.isArray(draft.style?.consistency) ? draft.style.consistency : [],
+    },
+    rubric: {
+      ...defaultDraftState.rubric,
+      ...(draft.rubric || {}),
+    },
+  };
+}
+
+function normalizeStoreData(data: Partial<Store> | null | undefined): Store {
+  const value = data || {};
+  return {
+    ...defaultStore,
+    ...value,
+    settings: {
+      ...defaultStore.settings,
+      ...(value.settings || {}),
+    },
+    draftState: mergeDraftState(value.draftState),
+  };
+}
+
 function App() {
   const [store, setStore] = useState<Store>(defaultStore);
+  const [storeLoaded, setStoreLoaded] = useState(false);
   const [activeTab, setActiveTab] = useState<TabKey>("auto");
   const [collapsed, setCollapsed] = useState(false);
   const [targetApp, setTargetApp] = useState<string | null>(null);
@@ -107,10 +299,16 @@ function App() {
     moved: boolean;
   } | null>(null);
   const suppressNextClick = useRef(false);
+  const draftStateRef = useRef<DraftState>(defaultDraftState);
+
+  useEffect(() => {
+    draftStateRef.current = store.draftState;
+  }, [store.draftState]);
 
   useEffect(() => {
     window.overlayAPI.getInitialData().then((result) => {
-      setStore({ ...defaultStore, ...result.data });
+      setStore(normalizeStoreData(result.data));
+      setStoreLoaded(true);
       setTargetApp(result.targetApp);
       setPlatform(result.platform);
       setAutoEvent(result.autoTyperStatus?.active ? result.autoTyperStatus.event : null);
@@ -221,13 +419,20 @@ function App() {
   async function saveSlice<K extends keyof Store>(key: K, value: Store[K]) {
     setStore((current) => ({ ...current, [key]: value }));
     const response = await window.overlayAPI.saveSlice(key as any, value);
-    if (response?.data) setStore({ ...defaultStore, ...response.data });
+    if (response?.data) setStore(normalizeStoreData(response.data));
   }
 
   async function appendSliceItem<K extends keyof Store>(key: K, item: unknown) {
     const response = await window.overlayAPI.appendSliceItem(key as any, item);
-    if (response?.data) setStore({ ...defaultStore, ...response.data });
+    if (response?.data) setStore(normalizeStoreData(response.data));
   }
+
+  const saveDraftSection = useCallback(<K extends keyof DraftState>(key: K, value: DraftState[K]) => {
+    const nextDraftState = mergeDraftState({ ...draftStateRef.current, [key]: value });
+    draftStateRef.current = nextDraftState;
+    setStore((current) => ({ ...current, draftState: nextDraftState }));
+    void window.overlayAPI.saveSlice("draftState" as any, nextDraftState);
+  }, []);
 
   async function refreshTarget() {
     const result = await window.overlayAPI.getTargetApp();
@@ -248,7 +453,12 @@ function App() {
 
   async function parseFiles(files: FileList | File[] | string[], acceptText: AcceptText) {
     const fileArray = Array.from(files as ArrayLike<File | string>);
-    const paths = textFromFiles(fileArray).filter(Boolean);
+    const paths = await Promise.all(
+      fileArray.map(async (file) => {
+        if (typeof file === "string") return file;
+        return (file as File & { path?: string }).path || window.overlayAPI.filePathForFile?.(file) || "";
+      }),
+    ).then((items) => items.filter(Boolean));
     const contents: Array<{ text: string; html?: string }> = [];
     const messages: string[] = [];
 
@@ -499,13 +709,16 @@ function App() {
 
           <section className="workspace">
         {activeTab === "auto" && (
-          <AutoTyperTab
-            targetApp={targetApp}
-            settings={store.settings}
-            autoEvent={autoEvent}
-            parseFiles={parseFiles}
-            captureSelected={captureSelected}
-            expanded={expandedView}
+	          <AutoTyperTab
+	            targetApp={targetApp}
+	            settings={store.settings}
+	            autoEvent={autoEvent}
+	            draft={store.draftState.auto}
+	            draftReady={storeLoaded}
+	            saveDraft={(draft) => saveDraftSection("auto", draft)}
+	            parseFiles={parseFiles}
+	            captureSelected={captureSelected}
+	            expanded={expandedView}
             onToggleExpanded={() => setExpandedView((current) => !current)}
             onStarted={() => setPanelCollapsed(true)}
           />
@@ -515,7 +728,10 @@ function App() {
             captureSelected={captureSelected}
             parseFiles={parseFiles}
             appendSliceItem={appendSliceItem}
-            expanded={false}
+            draft={store.draftState.citations}
+            draftReady={storeLoaded}
+            saveDraft={(draft) => saveDraftSection("citations", draft)}
+            expanded={expandedView}
           />
         )}
         {activeTab === "style" && (
@@ -528,7 +744,10 @@ function App() {
             clearProfile={() => saveSlice("styleProfile", null)}
             clearSamples={() => saveSlice("writingSamples", [] as any)}
             appendRevision={(item) => appendSliceItem("revisionHistory", item)}
-            expanded={false}
+            draft={store.draftState.style}
+            draftReady={storeLoaded}
+            saveDraft={(draft) => saveDraftSection("style", draft)}
+            expanded={expandedView}
           />
         )}
         {activeTab === "rubric" && (
@@ -536,7 +755,10 @@ function App() {
             parseFiles={parseFiles}
             captureSelected={captureSelected}
             appendReport={(report) => appendSliceItem("rubricReports", report)}
-            expanded={false}
+            draft={store.draftState.rubric}
+            draftReady={storeLoaded}
+            saveDraft={(draft) => saveDraftSection("rubric", draft)}
+            expanded={expandedView}
           />
         )}
           </section>
@@ -627,17 +849,22 @@ function EmptyState({ icon, title, body }: { icon: React.ReactNode; title: strin
   );
 }
 
+function CitationLoadingState() {
+  return (
+    <div className="citation-loading-state">
+      <span className="loading-spinner" />
+      <strong>Finding sources</strong>
+      <span>Searching public indexes, checking metadata, and ranking matches.</span>
+    </div>
+  );
+}
+
 type FormatCommand = "bold" | "italic" | "underline" | "justifyLeft" | "justifyCenter" | "justifyRight" | "insertUnorderedList" | "insertOrderedList";
 
 type InlineFormat = {
   bold: boolean;
   italic: boolean;
   underline: boolean;
-};
-
-type RichClipboardSource = {
-  html: string;
-  rtf: string;
 };
 
 type FormatState = Record<FormatCommand, boolean>;
@@ -1183,6 +1410,9 @@ function AutoTyperTab({
   targetApp,
   settings,
   autoEvent,
+  draft,
+  draftReady,
+  saveDraft,
   parseFiles,
   captureSelected,
   expanded,
@@ -1192,35 +1422,82 @@ function AutoTyperTab({
   targetApp: string | null;
   settings: Store["settings"];
   autoEvent: any;
+  draft: DraftState["auto"];
+  draftReady: boolean;
+  saveDraft: (draft: DraftState["auto"]) => void;
   parseFiles: (files: FileList | File[] | string[], acceptText: AcceptText) => Promise<void>;
   captureSelected: (acceptText: AcceptText) => Promise<void>;
   expanded: boolean;
   onToggleExpanded: () => void;
   onStarted: () => void;
 }) {
-  const [text, setText] = useState("");
-  const [richHtml, setRichHtml] = useState("");
-  const [richClipboardSource, setRichClipboardSource] = useState<RichClipboardSource>({ html: "", rtf: "" });
-  const [typingMode, setTypingMode] = useState<TypingMode>("structured");
-  const [speedPreset, setSpeedPreset] = useState("normal");
-  const [customWpm, setCustomWpm] = useState(45);
-  const [pauseFrequency, setPauseFrequency] = useState(0);
-  const [customChunkSize, setCustomChunkSize] = useState(35);
-  const [sectionBySection, setSectionBySection] = useState(false);
-  const [pauseAfterSentence, setPauseAfterSentence] = useState(true);
-  const [pauseAfterParagraph, setPauseAfterParagraph] = useState(false);
-  const [saveLog, setSaveLog] = useState(true);
-  const [saveProgressAfterEachChunk, setSaveProgressAfterEachChunk] = useState(true);
+  const [text, setText] = useState(draft.text);
+  const [richHtml, setRichHtml] = useState(draft.richHtml);
+  const [richClipboardSource, setRichClipboardSource] = useState<RichClipboardSource>(draft.richClipboardSource);
+  const [typingMode, setTypingMode] = useState<TypingMode>(draft.typingMode);
+  const [pauseFrequency, setPauseFrequency] = useState(draft.pauseFrequency);
+  const [sectionBySection, setSectionBySection] = useState(draft.sectionBySection);
+  const [pauseAfterSentence, setPauseAfterSentence] = useState(draft.pauseAfterSentence);
+  const [pauseAfterParagraph, setPauseAfterParagraph] = useState(draft.pauseAfterParagraph);
+  const [saveLog, setSaveLog] = useState(draft.saveLog);
+  const [saveProgressAfterEachChunk, setSaveProgressAfterEachChunk] = useState(draft.saveProgressAfterEachChunk);
   const [previewOpen, setPreviewOpen] = useState(false);
+  const [fileDropActive, setFileDropActive] = useState(false);
   const [message, setMessage] = useState("");
+  const hydratedDraft = useRef(false);
 
-  const wpm = speedPreset === "slow" ? 22 : speedPreset === "fast" ? 85 : speedPreset === "custom" ? customWpm : 45;
-  const chunks = useMemo(() => createChunks(text, typingMode, customChunkSize), [text, typingMode, customChunkSize]);
+  const wpm = 45;
+  const chunks = useMemo(() => createChunks(text, typingMode), [text, typingMode]);
   const visibleUnits = useMemo(() => countVisibleUnits(text), [text]);
   const duration = estimateDurationSeconds(chunks, typingMode, wpm);
   const completed = autoEvent?.log?.chunksCompleted || 0;
   const total = autoEvent?.log?.chunkCount || chunks.length;
   const isRunning = ["queued", "countdown", "progress", "paused", "resumed", "stopping"].includes(autoEvent?.type);
+
+  useEffect(() => {
+    if (draftReady && !hydratedDraft.current) {
+      setText(draft.text);
+      setRichHtml(draft.richHtml);
+      setRichClipboardSource(draft.richClipboardSource);
+      setTypingMode(draft.typingMode);
+      setPauseFrequency(draft.pauseFrequency);
+      setSectionBySection(draft.sectionBySection);
+      setPauseAfterSentence(draft.pauseAfterSentence);
+      setPauseAfterParagraph(draft.pauseAfterParagraph);
+      setSaveLog(draft.saveLog);
+      setSaveProgressAfterEachChunk(draft.saveProgressAfterEachChunk);
+      hydratedDraft.current = true;
+    }
+  }, [draft, draftReady]);
+
+  const draftSnapshot = useMemo<DraftState["auto"]>(
+    () => ({
+      text,
+      richHtml,
+      richClipboardSource,
+      typingMode,
+      pauseFrequency,
+      sectionBySection,
+      pauseAfterSentence,
+      pauseAfterParagraph,
+      saveLog,
+      saveProgressAfterEachChunk,
+    }),
+    [
+      text,
+      richHtml,
+      richClipboardSource,
+      typingMode,
+      pauseFrequency,
+      sectionBySection,
+      pauseAfterSentence,
+      pauseAfterParagraph,
+      saveLog,
+      saveProgressAfterEachChunk,
+    ],
+  );
+
+  useDraftAutosave(draftReady, draftSnapshot, saveDraft);
 
   useEffect(() => {
     if (autoEvent?.type === "error") setMessage(autoEvent.error || "Typing stopped with an error.");
@@ -1239,6 +1516,65 @@ function AutoTyperTab({
     setRichClipboardSource(isAppending ? { html: "", rtf: "" } : { html: html || nextHtml, rtf: rtf || "" });
   }
 
+  function clearAutoDraft() {
+    const nextDraft = defaultDraftState.auto;
+    setText(nextDraft.text);
+    setRichHtml(nextDraft.richHtml);
+    setRichClipboardSource(nextDraft.richClipboardSource);
+    setTypingMode(nextDraft.typingMode);
+    setPauseFrequency(nextDraft.pauseFrequency);
+    setSectionBySection(nextDraft.sectionBySection);
+    setPauseAfterSentence(nextDraft.pauseAfterSentence);
+    setPauseAfterParagraph(nextDraft.pauseAfterParagraph);
+    setSaveLog(nextDraft.saveLog);
+    setSaveProgressAfterEachChunk(nextDraft.saveProgressAfterEachChunk);
+    setPreviewOpen(false);
+    setMessage("Cleared.");
+    saveDraft(nextDraft);
+  }
+
+  function dragHasFiles(event: React.DragEvent<HTMLElement>): boolean {
+    return Array.from(event.dataTransfer.types).includes("Files");
+  }
+
+  function prepareFileDrop(event: React.DragEvent<HTMLElement>) {
+    if (!dragHasFiles(event)) return;
+    event.preventDefault();
+    event.stopPropagation();
+    event.dataTransfer.dropEffect = "copy";
+    setFileDropActive(true);
+  }
+
+  function leaveFileDrop(event: React.DragEvent<HTMLElement>) {
+    if (!dragHasFiles(event)) return;
+    const relatedTarget = event.relatedTarget as Node | null;
+    if (relatedTarget && event.currentTarget.contains(relatedTarget)) return;
+    setFileDropActive(false);
+  }
+
+  function uploadDroppedFiles(event: React.DragEvent<HTMLElement>) {
+    if (!dragHasFiles(event)) return;
+    event.preventDefault();
+    event.stopPropagation();
+    setFileDropActive(false);
+
+    const droppedFiles = Array.from(event.dataTransfer.files || []);
+    if (!droppedFiles.length) return;
+
+    const fileLabel = droppedFiles.length === 1 ? "file" : "files";
+    setMessage(`Uploading ${droppedFiles.length} ${fileLabel}...`);
+    void parseFiles(droppedFiles, appendText)
+      .then(() => setMessage(`Uploaded ${droppedFiles.length} ${fileLabel}.`))
+      .catch((error) => setMessage(error?.message || `Could not upload dropped ${fileLabel}.`));
+  }
+
+  const fileDropHandlers = {
+    onDragEnter: prepareFileDrop,
+    onDragOver: prepareFileDrop,
+    onDragLeave: leaveFileDrop,
+    onDrop: uploadDroppedFiles,
+  };
+
   async function start() {
     if (!text.trim()) {
       setMessage("Paste, upload, or capture text before starting.");
@@ -1252,7 +1588,7 @@ function AutoTyperTab({
       );
       if (!ok) return;
     }
-    const shouldPasteRichText = hasClipboardFormatting(richClipboardSource) || hasRichFormatting(richHtml);
+    const shouldPasteRichText = (hasClipboardFormatting(richClipboardSource) || hasRichFormatting(richHtml)) && chunks.length <= 1;
     const richHtmlForPaste = richClipboardSource.html || richHtml;
     const result = await window.overlayAPI.autoTyperStart({
       chunks,
@@ -1270,7 +1606,7 @@ function AutoTyperTab({
       lightEdits: false,
       saveLog,
       saveProgressAfterEachChunk,
-      preserveFormatting: true,
+      preserveFormatting: shouldPasteRichText,
       preserveClipboard: settings.preserveClipboard,
       targetApp,
     });
@@ -1312,7 +1648,7 @@ function AutoTyperTab({
           </div>
         </aside>
 
-        <section className="document-stage">
+        <section className={`document-stage file-drop-target paper-drop-target ${fileDropActive ? "is-file-over" : ""}`} {...fileDropHandlers}>
           <div className="paper-scroll">
             <div className="paper-editor-wrap" id="paper-page-0">
               <div className="paper-rich-editor">
@@ -1338,29 +1674,18 @@ function AutoTyperTab({
         <aside className="expanded-sidebar">
           <div className="settings-stack">
             <FieldLabel>
-              Speed
-              <select value={speedPreset} onChange={(event) => setSpeedPreset(event.target.value)}>
-                <option value="slow">Slow</option>
-                <option value="normal">Normal</option>
-                <option value="fast">Fast</option>
-                <option value="custom">Custom WPM</option>
-              </select>
-            </FieldLabel>
-            <FieldLabel>
-              Chunk size
+              Chunk by
               <select value={typingMode} onChange={(event) => setTypingMode(event.target.value as TypingMode)}>
-                <option value="structured">Structured</option>
                 <option value="sentence">Sentences</option>
                 <option value="paragraph">Paragraphs</option>
                 <option value="character">Characters</option>
                 <option value="word">Words</option>
-                <option value="custom">Custom chunks</option>
               </select>
             </FieldLabel>
             <FieldLabel>
-              Pause frequency
+              Extra pause
               <select value={pauseFrequency} onChange={(event) => setPauseFrequency(Number(event.target.value))}>
-                <option value={0}>Every chunk</option>
+                <option value={0}>Off</option>
                 <option value={2}>Every 2 chunks</option>
                 <option value={5}>Every 5 chunks</option>
               </select>
@@ -1370,6 +1695,10 @@ function AutoTyperTab({
               <button className="tool-button" onClick={() => captureSelected(appendText)}>
                 <Target size={16} />
                 <span>Capture</span>
+              </button>
+              <button className="tool-button" onClick={clearAutoDraft} disabled={!text.trim() && !richHtml.trim()}>
+                <X size={16} />
+                <span>Clear</span>
               </button>
             </div>
             <div className="progress-box">
@@ -1399,7 +1728,7 @@ function AutoTyperTab({
 
   return (
     <div className="auto-compact">
-      <section className="auto-text-card">
+      <section className={`auto-text-card file-drop-target ${fileDropActive ? "is-file-over" : ""}`} {...fileDropHandlers}>
         <button className="field-expand-button" onClick={onToggleExpanded} title="Open expanded writing view">
           <Maximize2 size={16} />
         </button>
@@ -1416,39 +1745,38 @@ function AutoTyperTab({
       </section>
 
       <section className="auto-controls-card">
-        <div className="speed-line">
-          <span>Speed</span>
-          <input
-            type="range"
-            className={`speed-slider speed-${speedPreset === "slow" ? "slow" : speedPreset === "fast" ? "fast" : "normal"}`}
-            min={0}
-            max={2}
-            value={speedPreset === "slow" ? 0 : speedPreset === "fast" ? 2 : 1}
-            onChange={(event) => setSpeedPreset(Number(event.target.value) === 0 ? "slow" : Number(event.target.value) === 2 ? "fast" : "normal")}
-          />
-          <em>{speedPreset === "slow" ? "Slow" : speedPreset === "fast" ? "Fast" : "Normal"}</em>
-        </div>
-
         <div className="compact-select-row">
           <FieldLabel>
-            Pause frequency
+            Chunk by
+            <select value={typingMode} onChange={(event) => setTypingMode(event.target.value as TypingMode)}>
+              <option value="sentence">Sentences</option>
+              <option value="paragraph">Paragraphs</option>
+              <option value="word">Words</option>
+              <option value="character">Characters</option>
+            </select>
+          </FieldLabel>
+          <FieldLabel>
+            Extra pause
             <select value={pauseFrequency} onChange={(event) => setPauseFrequency(Number(event.target.value))}>
-              <option value={0}>Every chunk</option>
-              <option value={2}>Every 2 sentences</option>
+              <option value={0}>Off</option>
+              <option value={2}>Every 2 chunks</option>
               <option value={5}>Every 5 chunks</option>
             </select>
           </FieldLabel>
-          <FieldLabel>
-            Chunk size
-            <select value={typingMode} onChange={(event) => setTypingMode(event.target.value as TypingMode)}>
-              <option value="structured">Structured</option>
-              <option value="sentence">Sentences</option>
-              <option value="paragraph">Paragraph</option>
-              <option value="word">Words</option>
-              <option value="character">Characters</option>
-              <option value="custom">Custom chunks</option>
-            </select>
-          </FieldLabel>
+        </div>
+        <div className="compact-metrics">
+          <div>
+            <strong>{chunks.length}</strong>
+            <span>chunks</span>
+          </div>
+          <div>
+            <strong>{visibleUnits}</strong>
+            <span>units</span>
+          </div>
+          <div>
+            <strong>{formatDuration(duration)}</strong>
+            <span>time</span>
+          </div>
         </div>
       </section>
 
@@ -1465,6 +1793,10 @@ function AutoTyperTab({
           <button className="tool-button" onClick={() => setPreviewOpen((current) => !current)}>
             <FileText size={16} />
             Preview
+          </button>
+          <button className="tool-button" onClick={clearAutoDraft} disabled={!text.trim() && !richHtml.trim()}>
+            <X size={16} />
+            Clear
           </button>
           <button className="primary-button" onClick={start} disabled={!text.trim()}>
             <Play size={16} />
@@ -1495,36 +1827,154 @@ function CheckRow({ label, checked, onChange }: { label: string; checked: boolea
   );
 }
 
+function useDraftAutosave<T>(ready: boolean, value: T, onSave: (value: T) => void) {
+  const latestValue = useRef(value);
+  const latestSave = useRef(onSave);
+  const readyRef = useRef(ready);
+
+  useEffect(() => {
+    latestValue.current = value;
+  }, [value]);
+
+  useEffect(() => {
+    latestSave.current = onSave;
+  }, [onSave]);
+
+  useEffect(() => {
+    readyRef.current = ready;
+  }, [ready]);
+
+  useEffect(() => {
+    if (!ready) return;
+    const timer = window.setTimeout(() => latestSave.current(latestValue.current), 500);
+    return () => window.clearTimeout(timer);
+  }, [ready, value]);
+
+  useEffect(
+    () => () => {
+      if (readyRef.current) latestSave.current(latestValue.current);
+    },
+    [],
+  );
+}
+
 function CitationsTab({
   captureSelected,
   parseFiles,
   appendSliceItem,
+  draft,
+  draftReady,
+  saveDraft,
   expanded,
 }: {
   captureSelected: (acceptText: AcceptText) => Promise<void>;
   parseFiles: (files: FileList | File[] | string[], acceptText: AcceptText) => Promise<void>;
   appendSliceItem: (key: keyof Store, item: unknown) => Promise<void>;
+  draft: DraftState["citations"];
+  draftReady: boolean;
+  saveDraft: (draft: DraftState["citations"]) => void;
   expanded: boolean;
 }) {
-  const [text, setText] = useState("");
-  const [style, setStyle] = useState<CitationStyle>("APA");
-  const [preferences, setPreferences] = useState<string[]>(["Scholarly sources"]);
-  const [fromYear, setFromYear] = useState("");
-  const [toYear, setToYear] = useState("");
-  const [sourcesNeeded, setSourcesNeeded] = useState(6);
-  const [inlineCitations, setInlineCitations] = useState(true);
-  const [generateBibliography, setGenerateBibliography] = useState(true);
-  const [flagUnsupported, setFlagUnsupported] = useState(true);
-  const [citationNeed, setCitationNeed] = useState("");
-  const [claims, setClaims] = useState<ClaimResult[]>([]);
-  const [selectedClaimId, setSelectedClaimId] = useState("");
-  const [approved, setApproved] = useState<Record<string, string[]>>({});
-  const [manual, setManual] = useState({ claimId: "", title: "", authors: "", year: "", url: "", doi: "", publisher: "" });
+  const [text, setText] = useState(draft.text);
+  const [style, setStyle] = useState<CitationStyle>(draft.style);
+  const [preferences, setPreferences] = useState<string[]>(draft.preferences);
+  const [fromYear, setFromYear] = useState(draft.fromYear);
+  const [toYear, setToYear] = useState(draft.toYear);
+  const [sourcesNeeded, setSourcesNeeded] = useState(draft.sourcesNeeded);
+  const [inlineCitations, setInlineCitations] = useState(draft.inlineCitations);
+  const [generateBibliography, setGenerateBibliography] = useState(draft.generateBibliography);
+  const [flagUnsupported, setFlagUnsupported] = useState(draft.flagUnsupported);
+  const [citationNeed, setCitationNeed] = useState(draft.citationNeed);
+  const [claims, setClaims] = useState<ClaimResult[]>(draft.claims);
+  const [selectedClaimId, setSelectedClaimId] = useState(draft.selectedClaimId);
+  const [approved, setApproved] = useState<Record<string, string[]>>(draft.approved);
+  const [manual, setManual] = useState<ManualSourceDraft>(draft.manual);
   const [loading, setLoading] = useState(false);
-  const [notes, setNotes] = useState<string[]>([]);
+  const [notes, setNotes] = useState<string[]>(draft.notes);
+  const hydratedDraft = useRef(false);
+
+  useEffect(() => {
+    if (draftReady && !hydratedDraft.current) {
+      setText(draft.text);
+      setStyle(draft.style);
+      setPreferences(draft.preferences);
+      setFromYear(draft.fromYear);
+      setToYear(draft.toYear);
+      setSourcesNeeded(draft.sourcesNeeded);
+      setInlineCitations(draft.inlineCitations);
+      setGenerateBibliography(draft.generateBibliography);
+      setFlagUnsupported(draft.flagUnsupported);
+      setCitationNeed(draft.citationNeed);
+      setClaims(draft.claims);
+      setSelectedClaimId(draft.selectedClaimId);
+      setApproved(draft.approved);
+      setManual(draft.manual);
+      setNotes(draft.notes);
+      hydratedDraft.current = true;
+    }
+  }, [draft, draftReady]);
+
+  const draftSnapshot = useMemo<DraftState["citations"]>(
+    () => ({
+      text,
+      style,
+      preferences,
+      fromYear,
+      toYear,
+      sourcesNeeded,
+      inlineCitations,
+      generateBibliography,
+      flagUnsupported,
+      citationNeed,
+      claims,
+      selectedClaimId,
+      approved,
+      manual,
+      notes,
+    }),
+    [
+      text,
+      style,
+      preferences,
+      fromYear,
+      toYear,
+      sourcesNeeded,
+      inlineCitations,
+      generateBibliography,
+      flagUnsupported,
+      citationNeed,
+      claims,
+      selectedClaimId,
+      approved,
+      manual,
+      notes,
+    ],
+  );
+
+  useDraftAutosave(draftReady, draftSnapshot, saveDraft);
 
   function appendText(value: string) {
     setText((current) => (current ? `${current}\n\n${value}` : value));
+  }
+
+  function clearCitationDraft() {
+    const nextDraft = defaultDraftState.citations;
+    setText(nextDraft.text);
+    setStyle(nextDraft.style);
+    setPreferences(nextDraft.preferences);
+    setFromYear(nextDraft.fromYear);
+    setToYear(nextDraft.toYear);
+    setSourcesNeeded(nextDraft.sourcesNeeded);
+    setInlineCitations(nextDraft.inlineCitations);
+    setGenerateBibliography(nextDraft.generateBibliography);
+    setFlagUnsupported(nextDraft.flagUnsupported);
+    setCitationNeed(nextDraft.citationNeed);
+    setClaims(nextDraft.claims);
+    setSelectedClaimId(nextDraft.selectedClaimId);
+    setApproved(nextDraft.approved);
+    setManual(nextDraft.manual);
+    setNotes(nextDraft.notes);
+    saveDraft(nextDraft);
   }
 
   function togglePreference(value: string) {
@@ -1545,6 +1995,7 @@ function CitationsTab({
         fromYear,
         toYear,
         sourcesNeeded,
+        aiSourceVerification: true,
         inlineCitations,
         generateBibliography,
         flagUnsupported,
@@ -1681,14 +2132,16 @@ function CitationsTab({
           {!claims.length && (
             <button className="tool-button slim" onClick={searchClaims} disabled={loading || !text.trim()}>
               <Search size={16} />
-              Find sources
+              {loading ? "Finding sources..." : "Find sources"}
             </button>
           )}
         </section>
 
         <section className="sources-card">
           <h2>Top sources for selected claim</h2>
-          {selectedSources.length ? (
+          {loading ? (
+            <CitationLoadingState />
+          ) : selectedSources.length ? (
             <div className="source-card-list">
               {selectedSources.map((source) => {
                 const isApproved = selectedClaim ? (approved[selectedClaim.id] || []).includes(source.id) : false;
@@ -1704,11 +2157,11 @@ function CitationsTab({
                     onKeyDown={(event) => openSourceFromKeyboard(event, source)}
                   >
                     <span className="source-letter">{(source.title || "S").slice(0, 1)}</span>
-                    <span>
-                      <em className={`quality ${qualityClass(source.qualityLabel)}`}>{source.qualityLabel || "Source"}</em>
-                      <strong>{source.title}</strong>
-                      <small>{source.container || source.publisher || source.url || "Retrieved source"} {source.year ? `• ${source.year}` : ""}</small>
-                    </span>
+                      <span>
+                        <em className={`quality ${qualityClass(source.qualityLabel)}`}>{source.qualityLabel || "Source"}</em>
+                        <strong>{source.title}</strong>
+                        <small>{source.supportLabel ? `${source.supportLabel} • ` : ""}{source.container || source.publisher || source.url || "Retrieved source"} {source.year ? `• ${source.year}` : ""}</small>
+                      </span>
                     <span className="source-actions">
                       <small>{Math.round((source.relevanceScore || 0.86) * 100)}% match</small>
                       <button
@@ -1744,9 +2197,9 @@ function CitationsTab({
           <select value={preferences[0] || "Scholarly sources"} onChange={(event) => setPreferences([event.target.value])}>
             <option>Scholarly sources</option>
             <option>News sources</option>
-          <option>Government sources</option>
-          <option>Books</option>
-        </select>
+            <option>Government sources</option>
+            <option>Books</option>
+          </select>
           <select className="source-count-select" value={sourcesNeeded} onChange={(event) => setSourcesNeeded(Number(event.target.value))}>
             <option value={3}>3 sources</option>
             <option value={5}>5 sources</option>
@@ -1759,6 +2212,10 @@ function CitationsTab({
           <button className="tool-button" onClick={copyRevised} disabled={!claims.length}>
             <FileText size={16} />
             Bibliography
+          </button>
+          <button className="tool-button" onClick={clearCitationDraft} disabled={!text.trim() && !claims.length}>
+            <X size={16} />
+            Clear
           </button>
         </footer>
       </div>
@@ -1778,6 +2235,10 @@ function CitationsTab({
             <button className="tool-button" onClick={() => captureSelected(appendText)}>
               <Target size={16} />
               Capture
+            </button>
+            <button className="tool-button" onClick={clearCitationDraft} disabled={!text.trim() && !claims.length}>
+              <X size={16} />
+              Clear
             </button>
           </div>
         </div>
@@ -1805,6 +2266,10 @@ function CitationsTab({
           <button className="tool-button" onClick={saveApprovedSources} disabled={!output.usedSources.length}>
             <Check size={16} />
             Save sources
+          </button>
+          <button className="tool-button" onClick={clearCitationDraft} disabled={!text.trim() && !claims.length}>
+            <X size={16} />
+            Clear
           </button>
         </div>
 
@@ -1953,6 +2418,9 @@ function StyleTab({
   clearProfile,
   clearSamples,
   appendRevision,
+  draft: savedDraft,
+  draftReady,
+  saveDraft,
   expanded,
 }: {
   profile: StyleProfile | null;
@@ -1963,26 +2431,95 @@ function StyleTab({
   clearProfile: () => Promise<void>;
   clearSamples: () => Promise<void>;
   appendRevision: (item: unknown) => Promise<void>;
+  draft: DraftState["style"];
+  draftReady: boolean;
+  saveDraft: (draft: DraftState["style"]) => void;
   expanded: boolean;
 }) {
-  const [sampleText, setSampleText] = useState("");
-  const [draft, setDraft] = useState("");
-  const [strength, setStrength] = useState<"light" | "normal" | "strong">("normal");
-  const [tone, setTone] = useState<"profile" | "clearer" | "simpler" | "formal" | "casual">("profile");
-  const [preserveMeaning, setPreserveMeaning] = useState(true);
-  const [makeClearer, setMakeClearer] = useState(true);
-  const [makeSimpler, setMakeSimpler] = useState(false);
-  const [makeFormal, setMakeFormal] = useState(false);
-  const [makeCasual, setMakeCasual] = useState(false);
-  const [keepCitations, setKeepCitations] = useState(true);
-  const [keepFormatting, setKeepFormatting] = useState(true);
-  const [reduceRobotic, setReduceRobotic] = useState(true);
-  const [preserveTechnicalTerms, setPreserveTechnicalTerms] = useState(true);
-  const [rewrite, setRewrite] = useState<RewriteResult | null>(null);
-  const [consistency, setConsistency] = useState<Array<{ id: string; paragraph: string; flags: string[]; score: number }>>([]);
-  const [editableInstructions, setEditableInstructions] = useState(profile?.rewriteInstructions || "");
+  const [sampleText, setSampleText] = useState(savedDraft.sampleText);
+  const [draft, setDraft] = useState(savedDraft.draft);
+  const [strength, setStrength] = useState<StyleRewriteStrength>(savedDraft.strength);
+  const [tone, setTone] = useState<StyleRewriteTone>(savedDraft.tone);
+  const [preserveMeaning, setPreserveMeaning] = useState(savedDraft.preserveMeaning);
+  const [makeClearer, setMakeClearer] = useState(savedDraft.makeClearer);
+  const [makeSimpler, setMakeSimpler] = useState(savedDraft.makeSimpler);
+  const [makeFormal, setMakeFormal] = useState(savedDraft.makeFormal);
+  const [makeCasual, setMakeCasual] = useState(savedDraft.makeCasual);
+  const [keepCitations, setKeepCitations] = useState(savedDraft.keepCitations);
+  const [keepFormatting, setKeepFormatting] = useState(savedDraft.keepFormatting);
+  const [reduceRobotic, setReduceRobotic] = useState(savedDraft.reduceRobotic);
+  const [preserveTechnicalTerms, setPreserveTechnicalTerms] = useState(savedDraft.preserveTechnicalTerms);
+  const [rewrite, setRewrite] = useState<RewriteResult | null>(savedDraft.rewrite);
+  const [consistency, setConsistency] = useState<StyleConsistencyItem[]>(savedDraft.consistency);
+  const [editableInstructions, setEditableInstructions] = useState(savedDraft.editableInstructions || profile?.rewriteInstructions || "");
+  const hydratedDraft = useRef(false);
 
-  useEffect(() => setEditableInstructions(profile?.rewriteInstructions || ""), [profile]);
+  useEffect(() => {
+    if (draftReady && !hydratedDraft.current) {
+      setSampleText(savedDraft.sampleText);
+      setDraft(savedDraft.draft);
+      setStrength(savedDraft.strength);
+      setTone(savedDraft.tone);
+      setPreserveMeaning(savedDraft.preserveMeaning);
+      setMakeClearer(savedDraft.makeClearer);
+      setMakeSimpler(savedDraft.makeSimpler);
+      setMakeFormal(savedDraft.makeFormal);
+      setMakeCasual(savedDraft.makeCasual);
+      setKeepCitations(savedDraft.keepCitations);
+      setKeepFormatting(savedDraft.keepFormatting);
+      setReduceRobotic(savedDraft.reduceRobotic);
+      setPreserveTechnicalTerms(savedDraft.preserveTechnicalTerms);
+      setRewrite(savedDraft.rewrite);
+      setConsistency(savedDraft.consistency);
+      setEditableInstructions(savedDraft.editableInstructions || profile?.rewriteInstructions || "");
+      hydratedDraft.current = true;
+    }
+  }, [draftReady, profile?.rewriteInstructions, savedDraft]);
+
+  useEffect(() => {
+    if (!editableInstructions.trim() && profile?.rewriteInstructions) setEditableInstructions(profile.rewriteInstructions);
+  }, [editableInstructions, profile?.rewriteInstructions]);
+
+  const draftSnapshot = useMemo<DraftState["style"]>(
+    () => ({
+      sampleText,
+      draft,
+      strength,
+      tone,
+      preserveMeaning,
+      makeClearer,
+      makeSimpler,
+      makeFormal,
+      makeCasual,
+      keepCitations,
+      keepFormatting,
+      reduceRobotic,
+      preserveTechnicalTerms,
+      rewrite,
+      consistency,
+      editableInstructions,
+    }),
+    [
+      sampleText,
+      draft,
+      strength,
+      tone,
+      preserveMeaning,
+      makeClearer,
+      makeSimpler,
+      makeFormal,
+      makeCasual,
+      keepCitations,
+      keepFormatting,
+      reduceRobotic,
+      preserveTechnicalTerms,
+      rewrite,
+      consistency,
+      editableInstructions,
+    ],
+  );
+
+  useDraftAutosave(draftReady, draftSnapshot, saveDraft);
 
   function appendSample(value: string) {
     setSampleText((current) => (current ? `${current}\n\n${value}` : value));
@@ -1990,6 +2527,27 @@ function StyleTab({
 
   function appendDraft(value: string) {
     setDraft((current) => (current ? `${current}\n\n${value}` : value));
+  }
+
+  function clearStyleDraft() {
+    const nextDraft = defaultDraftState.style;
+    setSampleText(nextDraft.sampleText);
+    setDraft(nextDraft.draft);
+    setStrength(nextDraft.strength);
+    setTone(nextDraft.tone);
+    setPreserveMeaning(nextDraft.preserveMeaning);
+    setMakeClearer(nextDraft.makeClearer);
+    setMakeSimpler(nextDraft.makeSimpler);
+    setMakeFormal(nextDraft.makeFormal);
+    setMakeCasual(nextDraft.makeCasual);
+    setKeepCitations(nextDraft.keepCitations);
+    setKeepFormatting(nextDraft.keepFormatting);
+    setReduceRobotic(nextDraft.reduceRobotic);
+    setPreserveTechnicalTerms(nextDraft.preserveTechnicalTerms);
+    setRewrite(nextDraft.rewrite);
+    setConsistency(nextDraft.consistency);
+    setEditableInstructions(profile?.rewriteInstructions || nextDraft.editableInstructions);
+    saveDraft({ ...nextDraft, editableInstructions: profile?.rewriteInstructions || nextDraft.editableInstructions });
   }
 
   async function createProfile() {
@@ -2121,6 +2679,10 @@ function StyleTab({
               <RefreshCcw size={18} />
               Regenerate
             </button>
+            <button className="tool-button large" onClick={clearStyleDraft} disabled={!sampleText.trim() && !draft.trim() && !rewrite}>
+              <X size={18} />
+              Clear
+            </button>
           </div>
         </aside>
       </div>
@@ -2143,6 +2705,10 @@ function StyleTab({
                 <Clipboard size={16} />
                 Paste text
               </button>
+              <button className="tool-button" onClick={clearStyleDraft} disabled={!sampleText.trim()}>
+                <X size={16} />
+                Clear
+              </button>
             </div>
           </div>
           <div className="file-badges">
@@ -2164,11 +2730,15 @@ function StyleTab({
             </div>
           ))}
           <p className="panel-note">Add at least one sample to continue.</p>
-          <button className="primary-button large" onClick={createProfile} disabled={countWords(sampleText) < 40}>
-            <Wand2 size={18} />
-            Generate style profile
-          </button>
-        </aside>
+            <button className="primary-button large" onClick={createProfile} disabled={countWords(sampleText) < 40}>
+              <Wand2 size={18} />
+              Generate style profile
+            </button>
+            <button className="tool-button large" onClick={clearStyleDraft} disabled={!sampleText.trim()}>
+              <X size={18} />
+              Clear
+            </button>
+          </aside>
       </div>
     );
   }
@@ -2235,6 +2805,10 @@ function StyleTab({
               <RefreshCcw size={16} />
               Regenerate
             </button>
+            <button className="tool-button" onClick={clearStyleDraft} disabled={!sampleText.trim() && !draft.trim() && !rewrite}>
+              <X size={16} />
+              Clear
+            </button>
             <button className="primary-button" onClick={() => rewrite && window.overlayAPI.insertText(rewrite.rewritten)} disabled={!rewrite}>
               <Check size={16} />
               Apply
@@ -2259,6 +2833,10 @@ function StyleTab({
               <Target size={16} />
               Capture draft
             </button>
+            <button className="tool-button" onClick={clearStyleDraft} disabled={!sampleText.trim() && !draft.trim() && !rewrite}>
+              <X size={16} />
+              Clear
+            </button>
           </div>
         </div>
 
@@ -2281,6 +2859,10 @@ function StyleTab({
               <button className="tool-button" onClick={clearSamples}>
                 <X size={16} />
                 Delete samples
+              </button>
+              <button className="tool-button" onClick={clearStyleDraft} disabled={!sampleText.trim() && !draft.trim() && !rewrite}>
+                <X size={16} />
+                Clear
               </button>
             </div>
           </div>
@@ -2431,23 +3013,64 @@ function RubricTab({
   parseFiles,
   captureSelected,
   appendReport,
+  draft,
+  draftReady,
+  saveDraft,
   expanded,
 }: {
   parseFiles: (files: FileList | File[] | string[], acceptText: AcceptText) => Promise<void>;
   captureSelected: (acceptText: AcceptText) => Promise<void>;
   appendReport: (report: RubricReport) => Promise<void>;
+  draft: DraftState["rubric"];
+  draftReady: boolean;
+  saveDraft: (draft: DraftState["rubric"]) => void;
   expanded: boolean;
 }) {
-  const [documentText, setDocumentText] = useState("");
-  const [rubricText, setRubricText] = useState("");
-  const [instructions, setInstructions] = useState("");
-  const [mode, setMode] = useState("Devil's advocate reviewer");
-  const [gradingScale, setGradingScale] = useState(100);
-  const [targetScore, setTargetScore] = useState(90);
-  const [citationStyle, setCitationStyle] = useState<CitationStyle>("APA");
-  const [minWords, setMinWords] = useState("");
-  const [maxWords, setMaxWords] = useState("");
-  const [report, setReport] = useState<RubricReport | null>(null);
+  const [documentText, setDocumentText] = useState(draft.documentText);
+  const [rubricText, setRubricText] = useState(draft.rubricText);
+  const [instructions, setInstructions] = useState(draft.instructions);
+  const [mode, setMode] = useState(draft.mode);
+  const [gradingScale, setGradingScale] = useState(draft.gradingScale);
+  const [targetScore, setTargetScore] = useState(draft.targetScore);
+  const [citationStyle, setCitationStyle] = useState<CitationStyle>(draft.citationStyle);
+  const [minWords, setMinWords] = useState(draft.minWords);
+  const [maxWords, setMaxWords] = useState(draft.maxWords);
+  const [report, setReport] = useState<RubricReport | null>(draft.report);
+  const hydratedDraft = useRef(false);
+
+  useEffect(() => {
+    if (draftReady && !hydratedDraft.current) {
+      setDocumentText(draft.documentText);
+      setRubricText(draft.rubricText);
+      setInstructions(draft.instructions);
+      setMode(draft.mode);
+      setGradingScale(draft.gradingScale);
+      setTargetScore(draft.targetScore);
+      setCitationStyle(draft.citationStyle);
+      setMinWords(draft.minWords);
+      setMaxWords(draft.maxWords);
+      setReport(draft.report);
+      hydratedDraft.current = true;
+    }
+  }, [draft, draftReady]);
+
+  const draftSnapshot = useMemo<DraftState["rubric"]>(
+    () => ({
+      documentText,
+      rubricText,
+      instructions,
+      mode,
+      gradingScale,
+      targetScore,
+      citationStyle,
+      minWords,
+      maxWords,
+      report,
+    }),
+    [documentText, rubricText, instructions, mode, gradingScale, targetScore, citationStyle, minWords, maxWords, report],
+  );
+
+  useDraftAutosave(draftReady, draftSnapshot, saveDraft);
 
   function appendDocument(value: string) {
     setDocumentText((current) => (current ? `${current}\n\n${value}` : value));
@@ -2455,6 +3078,21 @@ function RubricTab({
 
   function appendRubric(value: string) {
     setRubricText((current) => (current ? `${current}\n\n${value}` : value));
+  }
+
+  function clearRubricDraft() {
+    const nextDraft = defaultDraftState.rubric;
+    setDocumentText(nextDraft.documentText);
+    setRubricText(nextDraft.rubricText);
+    setInstructions(nextDraft.instructions);
+    setMode(nextDraft.mode);
+    setGradingScale(nextDraft.gradingScale);
+    setTargetScore(nextDraft.targetScore);
+    setCitationStyle(nextDraft.citationStyle);
+    setMinWords(nextDraft.minWords);
+    setMaxWords(nextDraft.maxWords);
+    setReport(nextDraft.report);
+    saveDraft(nextDraft);
   }
 
   async function analyze() {
@@ -2511,6 +3149,10 @@ function RubricTab({
           </p>
           <button className="tool-button" onClick={() => exportReport("markdown")}>
             View details
+          </button>
+          <button className="tool-button" onClick={clearRubricDraft}>
+            <X size={16} />
+            Clear
           </button>
         </section>
         <section className="score-card">
@@ -2576,6 +3218,10 @@ function RubricTab({
             <ShieldAlert size={16} />
             Check Draft
           </button>
+          <button className="tool-button" onClick={clearRubricDraft} disabled={!documentText.trim() && !rubricText.trim() && !report}>
+            <X size={16} />
+            Clear
+          </button>
         </footer>
       </div>
     );
@@ -2595,6 +3241,10 @@ function RubricTab({
             <button className="tool-button" onClick={() => captureSelected(appendDocument)}>
               <Target size={16} />
               Capture draft
+            </button>
+            <button className="tool-button" onClick={clearRubricDraft} disabled={!documentText.trim() && !rubricText.trim() && !report}>
+              <X size={16} />
+              Clear
             </button>
           </div>
         </div>
@@ -2650,6 +3300,10 @@ function RubricTab({
           <button className="tool-button" onClick={() => exportReport("clipboard")} disabled={!report}>
             <Copy size={16} />
             Clipboard
+          </button>
+          <button className="tool-button" onClick={clearRubricDraft} disabled={!documentText.trim() && !rubricText.trim() && !report}>
+            <X size={16} />
+            Clear
           </button>
         </div>
 

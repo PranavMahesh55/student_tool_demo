@@ -46,114 +46,13 @@ export function splitParagraphs(text: string): string[] {
   return paragraphs.filter((part) => part.length > 0);
 }
 
-function isFenceLine(line: string): boolean {
-  return /^\s*(```|~~~)/.test(line);
-}
-
-function isMathFenceLine(line: string): boolean {
-  return /^\s*(\$\$|\\\[|\\\]|\\begin\{(?:equation|align|align\*|gather|gather\*|matrix|pmatrix|bmatrix|cases)\}|\\end\{(?:equation|align|align\*|gather|gather\*|matrix|pmatrix|bmatrix|cases)\})\s*$/.test(
-    line,
-  );
-}
-
-function isCodeLikeLine(line: string): boolean {
-  const trimmed = line.trim();
-  if (!trimmed) return false;
-  return (
-    /^( {2,}|\t)/.test(line) ||
-    /^(import|export|from|class|def|function|const|let|var|if|else|for|while|switch|case|try|catch|return|public|private|protected|interface|type|enum|namespace|package|using|#include|SELECT|WITH|UPDATE|INSERT|DELETE|CREATE|ALTER|DROP)\b/.test(
-      trimmed,
-    ) ||
-    /^[}\])};,]+$/.test(trimmed) ||
-    /[{}[\];]|=>|:=|==|!=|<=|>=|&&|\|\||::|->|<\/?[A-Za-z][^>]*>/.test(trimmed)
-  );
-}
-
-function isMathLikeLine(line: string): boolean {
-  const trimmed = line.trim();
-  if (!trimmed) return false;
-  return (
-    /\\(?:frac|sum|int|lim|sqrt|alpha|beta|gamma|theta|lambda|mu|pi|sigma|Delta|nabla|cdot|times|leq|geq|neq|approx|infty|begin|end)\b/.test(
-      trimmed,
-    ) ||
-    /\$\S.*\S\$/.test(trimmed) ||
-    /(?:^|[\s(])[A-Za-z0-9_]+\s*=\s*[-+*/^()[\]{}\w\s.,]+$/.test(trimmed) ||
-    /[∑∫√∞≈≠≤≥±×÷→←↔∀∃∈∉⊂⊆∪∩∂∆∇πθλμσΩ]/.test(trimmed)
-  );
-}
-
-function isTableOrListLine(line: string): boolean {
-  const trimmed = line.trim();
-  return /^(\|.*\||[-*+]\s+|\d+[.)]\s+|>\s+)/.test(trimmed) || /^\s*[-:| ]{3,}\s*$/.test(trimmed);
-}
-
-function isStructuredLine(line: string): boolean {
-  return isCodeLikeLine(line) || isMathLikeLine(line) || isTableOrListLine(line);
-}
-
-function pushStructuredChunk(chunks: string[], value: string) {
-  if (value) chunks.push(value);
-}
-
-export function splitStructured(text: string): string[] {
-  const lines = text.match(/[^\n]*(?:\n|$)/g)?.filter((line) => line.length > 0) || [];
-  const chunks: string[] = [];
-  let prose = "";
-  let structured = "";
-  let inFence = false;
-  let inMathBlock = false;
-
-  function flushProse() {
-    if (!prose) return;
-    splitSentences(prose).forEach((part) => pushStructuredChunk(chunks, part));
-    prose = "";
-  }
-
-  function flushStructured() {
-    pushStructuredChunk(chunks, structured);
-    structured = "";
-  }
-
-  for (const line of lines) {
-    const blank = line.trim().length === 0;
-    const opensFence = isFenceLine(line);
-    const mathFence = isMathFenceLine(line);
-    const shouldStayWhole = inFence || inMathBlock || opensFence || mathFence || isStructuredLine(line);
-
-    if (shouldStayWhole) {
-      flushProse();
-      structured += line;
-      if (opensFence) inFence = !inFence;
-      if (mathFence) inMathBlock = !inMathBlock;
-      continue;
-    }
-
-    if (structured) flushStructured();
-    prose += line;
-    if (blank) flushProse();
-  }
-
-  flushProse();
-  flushStructured();
-  return chunks.filter((part) => part.length > 0);
-}
-
-export function createChunks(text: string, mode: TypingMode, customChunkSize = 40): string[] {
+export function createChunks(text: string, mode: TypingMode): string[] {
   if (!text) return [];
 
-  if (mode === "structured") return splitStructured(text);
   if (mode === "character") return splitGraphemes(text);
   if (mode === "word") return text.match(/\S+\s*/g) || [];
   if (mode === "sentence") return splitSentences(text);
-  if (mode === "paragraph") return splitParagraphs(text);
-
-  const words = text.match(/\S+\s*/g) || [];
-  const size = Math.max(1, customChunkSize);
-  const chunks: string[] = [];
-  for (let index = 0; index < words.length; index += size) {
-    chunks.push(words.slice(index, index + size).join(""));
-  }
-  return chunks;
+  return splitParagraphs(text);
 }
 
 export function estimateDurationSeconds(chunks: string[], mode: TypingMode, wpm: number): number {

@@ -23,6 +23,7 @@ declare global {
       insertText: (text: string) => Promise<any>;
       selectFiles?: (options: { accept: string; multiple?: boolean }) => Promise<any>;
       parseFiles: (paths: string[]) => Promise<any[]>;
+      filePathForFile?: (file: File) => string;
       saveSlice: (key: StoreKey, value: unknown) => Promise<any>;
       appendSliceItem: (key: StoreKey, item: unknown) => Promise<any>;
       clearSlice: (key: StoreKey) => Promise<any>;

@@ -23,6 +23,7 @@ const allowedDataKeys = new Set([
   "autoTyperLogs",
   "rubricReports",
   "revisionHistory",
+  "draftState",
 ]);
 
 function defaultDb() {
@@ -41,6 +42,7 @@ function defaultDb() {
     autoTyperLogs: [],
     rubricReports: [],
     revisionHistory: [],
+    draftState: {},
   };
 }
 
@@ -750,29 +752,47 @@ function sourceMatchesDate(source, request) {
   return true;
 }
 
+function stripHtml(value) {
+  return String(value || "")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function openAlexAbstract(invertedIndex) {
+  if (!invertedIndex || typeof invertedIndex !== "object") return "";
+  const words = [];
+  for (const [word, positions] of Object.entries(invertedIndex)) {
+    if (!Array.isArray(positions)) continue;
+    for (const position of positions) words[position] = word;
+  }
+  return words.filter(Boolean).join(" ");
+}
+
 function scoreSource(source, claim) {
   const claimTerms = textTokens(claim);
-  const titleTerms = textTokens(source.title);
-  const overlap = claimTerms.filter((term) => titleTerms.includes(term)).length;
+  const sourceTerms = textTokens([source.title, source.abstract, source.description, source.container, source.publisher].filter(Boolean).join(" "));
+  const overlap = claimTerms.filter((term) => sourceTerms.includes(term)).length;
   const ratio = claimTerms.length ? overlap / Math.max(1, claimTerms.length) : 0;
   const hasDoi = Boolean(source.doi);
   const isGov = /\.gov\b/i.test(source.url || "");
   const isScholarly = /journal|article|proceedings|preprint|dissertation/i.test(source.type || "");
+  const isBook = /book/i.test(source.type || "");
   let qualityLabel = "Unverified source";
   let qualityReason = "Retrieved from a public source index, but needs manual review.";
 
-  if (ratio < 0.06 && !isGov) {
+  if (ratio < 0.08) {
     qualityLabel = "Possibly irrelevant source";
-    qualityReason = "Low title overlap with the claim.";
-  } else if ((hasDoi && isScholarly) || isGov) {
+    qualityReason = "Low metadata overlap with the claim.";
+  } else if ((hasDoi && isScholarly && ratio >= 0.18) || (isGov && ratio >= 0.12)) {
     qualityLabel = "Strong source";
-    qualityReason = hasDoi ? "Scholarly source with DOI metadata." : "Government source URL.";
-  } else if (hasDoi || isScholarly || /book/i.test(source.type || "")) {
+    qualityReason = hasDoi ? "Scholarly metadata and claim context overlap." : "Government source with claim context overlap.";
+  } else if ((hasDoi || isScholarly || isBook) && ratio >= 0.1) {
     qualityLabel = "Acceptable source";
-    qualityReason = "Stable bibliographic metadata was retrieved.";
-  } else if (ratio > 0.15) {
+    qualityReason = "Stable bibliographic metadata and some claim context overlap.";
+  } else if (ratio >= 0.1) {
     qualityLabel = "Weak source";
-    qualityReason = "Relevant title terms, but limited authority metadata.";
+    qualityReason = "Some relevant metadata terms, but limited support evidence.";
   }
 
   return { qualityLabel, qualityReason, relevanceScore: Number(ratio.toFixed(2)) };
@@ -816,6 +836,7 @@ async function searchCrossref(query, request) {
       container: Array.isArray(item["container-title"]) ? item["container-title"][0] : "",
       doi: item.DOI || "",
       url: item.URL || (item.DOI ? `https://doi.org/${item.DOI}` : ""),
+      abstract: stripHtml(item.abstract),
       type: item.type || "work",
       sourceApi: "Crossref",
     };
@@ -843,6 +864,7 @@ async function searchOpenAlex(query, request) {
     container: item.primary_location?.source?.display_name || "",
     doi: item.doi ? String(item.doi).replace(/^https?:\/\/doi.org\//i, "") : "",
     url: item.primary_location?.landing_page_url || item.doi || item.id || "",
+    abstract: openAlexAbstract(item.abstract_inverted_index),
     type: item.type || "work",
     sourceApi: "OpenAlex",
   }));
@@ -866,10 +888,235 @@ async function searchGoogleBooks(query, request) {
       container: "",
       doi: "",
       url: info.infoLink || "",
+      description: stripHtml(info.description),
       type: "book",
       sourceApi: "Google Books",
     };
   });
+}
+
+function truncateText(value, maxLength = 900) {
+  const text = stripHtml(value);
+  return text.length > maxLength ? `${text.slice(0, maxLength - 1)}…` : text;
+}
+
+function sourceForAi(source) {
+  return {
+    id: source.id,
+    title: source.title || "",
+    authors: source.authors || [],
+    year: source.year || "",
+    container: source.container || "",
+    publisher: source.publisher || "",
+    type: source.type || "",
+    sourceApi: source.sourceApi || "",
+    doi: source.doi || "",
+    url: source.url || "",
+    abstract: truncateText(source.abstract || source.description || "", 750),
+    heuristicLabel: source.qualityLabel || "",
+    heuristicScore: source.relevanceScore || 0,
+  };
+}
+
+function responseOutputText(responseJson) {
+  if (typeof responseJson?.output_text === "string") return responseJson.output_text;
+  return (responseJson?.output || [])
+    .flatMap((item) => item.content || [])
+    .map((content) => content.text || "")
+    .join("");
+}
+
+function aiQuality(source, supportLabel, supportScore, reason) {
+  const score = Math.max(0, Math.min(100, Number(supportScore) || 0));
+  const hasAuthority = Boolean(source.doi) || /\.gov\b/i.test(source.url || "") || /journal|article|proceedings|preprint|book/i.test(source.type || "");
+  if (supportLabel === "Supports claim" && score >= 82 && hasAuthority) {
+    return {
+      qualityLabel: "Strong source",
+      qualityReason: `AI semantic check: likely supports the claim. ${reason}`,
+    };
+  }
+  if (supportLabel === "Supports claim" && score >= 65) {
+    return {
+      qualityLabel: "Acceptable source",
+      qualityReason: `AI semantic check: supports the claim, but review before submitting. ${reason}`,
+    };
+  }
+  if (supportLabel === "Related but weak") {
+    return {
+      qualityLabel: "Weak source",
+      qualityReason: `AI semantic check: related but not direct support. ${reason}`,
+    };
+  }
+  if (supportLabel === "Background only") {
+    return {
+      qualityLabel: "Weak source",
+      qualityReason: `AI semantic check: useful background, not direct support. ${reason}`,
+    };
+  }
+  return {
+    qualityLabel: "Possibly irrelevant source",
+    qualityReason: `AI semantic check: not enough evidence that this supports the claim. ${reason}`,
+  };
+}
+
+function sortAiVerifiedSources(sources) {
+  const labelRank = {
+    "Supports claim": 4,
+    "Related but weak": 3,
+    "Background only": 2,
+    Unrelated: 1,
+  };
+  return [...sources].sort((a, b) => {
+    const labelDiff = (labelRank[b.supportLabel] || 0) - (labelRank[a.supportLabel] || 0);
+    if (labelDiff) return labelDiff;
+    const scoreDiff = (b.semanticScore || b.relevanceScore || 0) - (a.semanticScore || a.relevanceScore || 0);
+    if (scoreDiff) return scoreDiff;
+    return Number(Boolean(b.doi)) - Number(Boolean(a.doi));
+  });
+}
+
+async function verifyCitationResultsWithAi(results, request) {
+  if (request.aiSourceVerification === false) {
+    return { results, note: "AI semantic source verification disabled." };
+  }
+
+  const apiKey = process.env.OPENAI_API_KEY;
+  if (!apiKey) {
+    return {
+      results,
+      note: "AI semantic source verification skipped. Set OPENAI_API_KEY to enable stricter support checks.",
+    };
+  }
+
+  const claims = results
+    .filter((claim) => claim.sources?.length)
+    .map((claim) => ({
+      claimId: claim.id,
+      claimText: claim.text,
+      claimType: claim.type,
+      sources: claim.sources.slice(0, Math.max(1, Number(request.sourcesNeeded || 6))).map(sourceForAi),
+    }));
+
+  if (!claims.length) return { results, note: "No source candidates were available for AI verification." };
+
+  const model = process.env.OPENAI_CITATION_MODEL || "gpt-5.4-mini";
+  const schema = {
+    type: "object",
+    additionalProperties: false,
+    properties: {
+      claims: {
+        type: "array",
+        items: {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            claimId: { type: "string" },
+            sources: {
+              type: "array",
+              items: {
+                type: "object",
+                additionalProperties: false,
+                properties: {
+                  id: { type: "string" },
+                  supportLabel: {
+                    type: "string",
+                    enum: ["Supports claim", "Related but weak", "Background only", "Unrelated"],
+                  },
+                  supportScore: { type: "number" },
+                  reason: { type: "string" },
+                },
+                required: ["id", "supportLabel", "supportScore", "reason"],
+              },
+            },
+          },
+          required: ["claimId", "sources"],
+        },
+      },
+    },
+    required: ["claims"],
+  };
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 18000);
+  try {
+    const response = await fetch(`${process.env.OPENAI_BASE_URL || "https://api.openai.com/v1"}/responses`, {
+      method: "POST",
+      signal: controller.signal,
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        model,
+        instructions:
+          "You verify whether retrieved source metadata actually supports citation claims. Penalize keyword-only overlap. A source supports a claim only when the title, abstract, description, venue, and metadata indicate the same subject, claim type, population/entity, and context. Do not reward a source merely because it shares a country, tool name, or broad topic word.",
+        input: [
+          {
+            role: "user",
+            content: [
+              {
+                type: "input_text",
+                text: JSON.stringify({ claims }),
+              },
+            ],
+          },
+        ],
+        reasoning: { effort: "low" },
+        max_output_tokens: 5000,
+        text: {
+          format: {
+            type: "json_schema",
+            name: "citation_source_support",
+            strict: true,
+            schema,
+          },
+        },
+      }),
+    });
+
+    if (!response.ok) {
+      const errorText = await response.text().catch(() => "");
+      return { results, note: `AI semantic source verification failed (${response.status}). ${errorText.slice(0, 160)}` };
+    }
+
+    const json = await response.json();
+    const parsed = JSON.parse(responseOutputText(json));
+    const evaluationsByClaim = new Map(
+      (parsed.claims || []).map((claim) => [
+        claim.claimId,
+        new Map((claim.sources || []).map((source) => [source.id, source])),
+      ]),
+    );
+
+    return {
+      results: results.map((claim) => {
+        const evaluations = evaluationsByClaim.get(claim.id);
+        if (!evaluations) return claim;
+        const sources = claim.sources.map((source) => {
+          const evaluation = evaluations.get(source.id);
+          if (!evaluation) return source;
+          const reason = truncateText(evaluation.reason, 220);
+          const supportScore = Math.max(0, Math.min(100, Number(evaluation.supportScore) || 0));
+          const quality = aiQuality(source, evaluation.supportLabel, supportScore, reason);
+          return {
+            ...source,
+            ...quality,
+            aiReviewed: true,
+            supportLabel: evaluation.supportLabel,
+            semanticScore: Number((supportScore / 100).toFixed(2)),
+            relevanceScore: Number((supportScore / 100).toFixed(2)),
+          };
+        });
+        return { ...claim, sources: sortAiVerifiedSources(sources) };
+      }),
+      note: `AI semantic source verification enabled with ${model}.`,
+    };
+  } catch (error) {
+    const message = error?.name === "AbortError" ? "timed out" : error?.message || String(error);
+    return { results, note: `AI semantic source verification skipped: ${message}.` };
+  } finally {
+    clearTimeout(timeout);
+  }
 }
 
 async function searchSourcesForClaim(claim, request) {
@@ -997,9 +1244,10 @@ async function parseOneFile(filePath) {
 
     if (ext === ".docx") {
       const mammoth = require("mammoth");
+      const htmlOptions = createDocxHtmlOptions(mammoth);
       const [textResult, htmlResult] = await Promise.all([
         mammoth.extractRawText({ path: filePath }),
-        mammoth.convertToHtml({ path: filePath }),
+        mammoth.convertToHtml({ path: filePath }, htmlOptions),
       ]);
       return {
         path: filePath,
@@ -1040,6 +1288,47 @@ async function parseOneFile(filePath) {
   } catch (error) {
     return { path: filePath, name, text: "", error: error.message || String(error) };
   }
+}
+
+function createDocxHtmlOptions(mammoth) {
+  const alignments = [
+    ["Center", "center"],
+    ["Right", "right"],
+    ["Justify", "justify"],
+  ];
+  const headingLevels = [1, 2, 3, 4, 5, 6];
+  const styleMap = [
+    "u => u",
+    ...alignments.map(([name, value]) => `p.AutoTyperAlign${name} => p[style='text-align: ${value};']:fresh`),
+    ...alignments.flatMap(([name, value]) =>
+      headingLevels.map((level) => `p.AutoTyperAlign${name}Heading${level} => h${level}[style='text-align: ${value};']:fresh`),
+    ),
+  ];
+
+  function alignmentName(value) {
+    if (value === "center") return "Center";
+    if (value === "right") return "Right";
+    if (["both", "distribute", "thaiDistribute", "mediumKashida", "highKashida", "lowKashida"].includes(value)) return "Justify";
+    return "";
+  }
+
+  function headingLevel(paragraph) {
+    const style = `${paragraph.styleId || ""} ${paragraph.styleName || ""}`;
+    const match = style.match(/\bheading\s*([1-6])\b/i) || style.match(/\bheading([1-6])\b/i);
+    return match ? Number(match[1]) : 0;
+  }
+
+  return {
+    styleMap,
+    transformDocument: mammoth.transforms.paragraph((paragraph) => {
+      const alignName = alignmentName(paragraph.alignment);
+      if (!alignName || paragraph.numbering) return paragraph;
+
+      const level = headingLevel(paragraph);
+      const styleId = level ? `AutoTyperAlign${alignName}Heading${level}` : `AutoTyperAlign${alignName}`;
+      return { ...paragraph, styleId, styleName: styleId };
+    }),
+  };
 }
 
 async function exportDocx(filePath, title, content) {
@@ -1412,13 +1701,15 @@ ipcMain.handle("citations:search", async (_event, request) => {
         : "No retrieved source met this search request. Add a manual source or revise the query.",
     });
   }
+  const verified = await verifyCitationResultsWithAi(results, request);
   return {
     ok: true,
     searchedAt: new Date().toISOString(),
-    claims: results,
+    claims: verified.results,
     notes: [
       "Only retrieved sources are shown.",
       "Page numbers are not generated unless you add them manually.",
+      verified.note,
       "Quality labels are estimates and should be reviewed before submission.",
     ],
   };

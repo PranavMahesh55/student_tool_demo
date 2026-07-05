@@ -1,4 +1,4 @@
-export type TypingMode = "structured" | "character" | "word" | "sentence" | "paragraph" | "custom";
+export type TypingMode = "character" | "word" | "sentence" | "paragraph";
 export type CitationStyle = "APA" | "MLA" | "Chicago" | "IEEE";
 
 export interface SourceRecord {
@@ -10,11 +10,16 @@ export interface SourceRecord {
   container?: string;
   doi?: string;
   url?: string;
+  abstract?: string;
+  description?: string;
   type?: string;
   sourceApi?: string;
   qualityLabel?: string;
   qualityReason?: string;
   relevanceScore?: number;
+  semanticScore?: number;
+  supportLabel?: string;
+  aiReviewed?: boolean;
   manual?: boolean;
 }
 
